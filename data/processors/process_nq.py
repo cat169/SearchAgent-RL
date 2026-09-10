@@ -1,4 +1,4 @@
-"""Convert FlashRAG NQ into the project's clean QA JSONL format."""
+"""Clean FlashRAG NQ and write one JSONL file for each official split."""
 
 from __future__ import annotations
 
@@ -6,205 +6,244 @@ import argparse
 import json
 import os
 import re
-from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 
 DATASET_NAME = "RUC-NLPIR/FlashRAG_datasets"
 DATASET_CONFIG = "nq"
-REQUIRED_SOURCE_FIELDS = {"id", "question", "golden_answers"}
-WHITESPACE_RE = re.compile(r"\s+")
+REQUIRED_SPLITS = ("train", "dev", "test")
+REQUIRED_FIELDS = {"id", "question", "golden_answers"}
 
 
-def normalize_whitespace(value: str) -> str:
-    """Strip a string and collapse all consecutive whitespace to one space."""
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        default=Path("data/processed/nq"),
+        help="Output directory (default: data/processed/nq).",
+    )
+    parser.add_argument(
+        "--max_samples_per_split",
+        type=int,
+        default=None,
+        help="Process at most the first N samples of each split.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow existing split files to be replaced.",
+    )
+    args = parser.parse_args()
+    if args.max_samples_per_split is not None and args.max_samples_per_split <= 0:
+        parser.error("--max_samples_per_split must be a positive integer")
+    return args
 
-    return WHITESPACE_RE.sub(" ", value).strip()
+
+def normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
 
-def clean_answers(raw_answers: Any) -> Tuple[Optional[List[str]], Optional[str]]:
-    if isinstance(raw_answers, str):
-        answers: Iterable[Any] = [raw_answers]
-    elif isinstance(raw_answers, (list, tuple)):
-        answers = raw_answers
-    else:
-        return None, "invalid_type"
+def clean_answers(
+    answers: Any,
+    *,
+    split: str,
+    row_index: int,
+    sample_id: Any,
+) -> tuple[list[str], int, int]:
+    context = f"split={split}, row={row_index}, id={sample_id!r}"
+    if not isinstance(answers, list) or not answers:
+        raise ValueError(f"Invalid golden_answers ({context}): expected a non-empty list")
 
-    cleaned: List[str] = []
-    seen = set()
-    for answer in answers:
-        if not isinstance(answer, str):
-            return None, "invalid_type"
-        normalized = normalize_whitespace(answer)
-        if not normalized:
+    cleaned_answers: list[str] = []
+    seen_answers: set[str] = set()
+    normalized_count = 0
+    duplicate_count = 0
+
+    for answer_index, answer in enumerate(answers):
+        if not isinstance(answer, str) or not answer:
+            raise ValueError(
+                f"Invalid golden_answers[{answer_index}] ({context}): "
+                "expected a non-empty string"
+            )
+
+        cleaned_answer = normalize_whitespace(answer)
+        if not cleaned_answer:
+            raise ValueError(
+                f"Invalid golden_answers[{answer_index}] ({context}): "
+                "answer is empty after whitespace normalization"
+            )
+        if cleaned_answer != answer:
+            normalized_count += 1
+
+        deduplication_key = cleaned_answer.casefold()
+        if deduplication_key in seen_answers:
+            duplicate_count += 1
             continue
-        deduplication_key = normalized.casefold()
-        if deduplication_key not in seen:
-            seen.add(deduplication_key)
-            cleaned.append(normalized)
 
-    if not cleaned:
-        return None, "empty_gold_answers"
-    return cleaned, None
+        seen_answers.add(deduplication_key)
+        cleaned_answers.append(cleaned_answer)
 
-
-def transform_sample(sample: Dict[str, Any], split: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    question = sample.get("question")
-    original_id = sample.get("id")
-
-    if not isinstance(question, str) or not isinstance(original_id, str):
-        return None, "invalid_type"
-
-    question = normalize_whitespace(question)
-    if not question:
-        return None, "empty_question"
-
-    original_id = original_id.strip()
-    if not original_id:
-        return None, "empty_original_id"
-
-    answers, error = clean_answers(sample.get("golden_answers"))
-    if error is not None:
-        return None, error
-
-    return {
-        "uid": f"nq_{original_id}",
-        "source": "nq",
-        "question": question,
-        "gold_answers": answers,
-        "source_split": split,
-        "metadata": {"original_id": original_id},
-    }, None
+    if not cleaned_answers:
+        raise ValueError(
+            f"Invalid golden_answers ({context}): no answers remain after cleaning"
+        )
+    return cleaned_answers, normalized_count, duplicate_count
 
 
 def validate_source_schema(dataset: Any) -> None:
-    problems = []
-    for split, split_dataset in dataset.items():
-        fields = set(split_dataset.features.keys())
-        missing = REQUIRED_SOURCE_FIELDS - fields
-        if missing:
-            sample = split_dataset[0] if len(split_dataset) else None
-            problems.append(
-                f"split={split!r}, fields={sorted(fields)!r}, "
-                f"missing={sorted(missing)!r}, sample={sample!r}"
-            )
-
-    if problems:
-        details = "\n".join(problems)
+    missing_splits = [split for split in REQUIRED_SPLITS if split not in dataset]
+    if missing_splits:
         raise ValueError(
-            "FlashRAG NQ schema differs from the required source schema; "
-            f"processing stopped.\n{details}"
+            f"FlashRAG NQ is missing required splits: {', '.join(missing_splits)}"
         )
 
+    for split in REQUIRED_SPLITS:
+        fields = set(dataset[split].column_names)
+        missing_fields = REQUIRED_FIELDS - fields
+        if missing_fields:
+            raise ValueError(
+                f"FlashRAG NQ split={split} is missing fields "
+                f"{sorted(missing_fields)}; actual fields={sorted(fields)}"
+            )
 
-def process_dataset(dataset: Any, output_path: Path, max_samples: Optional[int]) -> Dict[str, Any]:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = output_path.with_name(f".{output_path.name}.tmp")
-    split_stats = {
-        split: {"total": 0, "kept": 0, "dropped": 0, "drop_reasons": Counter()}
-        for split in dataset.keys()
+
+def transform_sample(
+    sample: dict[str, Any], split: str, row_index: int
+) -> tuple[dict[str, Any], int, int, int]:
+    sample_id = sample.get("id")
+    context = f"split={split}, row={row_index}, id={sample_id!r}"
+
+    if not isinstance(sample_id, str) or not sample_id.strip():
+        raise ValueError(f"Invalid id ({context}): expected a non-empty string")
+
+    question = sample.get("question")
+    if not isinstance(question, str) or not question:
+        raise ValueError(f"Invalid question ({context}): expected a non-empty string")
+    cleaned_question = normalize_whitespace(question)
+    if not cleaned_question:
+        raise ValueError(
+            f"Invalid question ({context}): empty after whitespace normalization"
+        )
+
+    cleaned_answers, normalized_answers, duplicate_answers = clean_answers(
+        sample.get("golden_answers"),
+        split=split,
+        row_index=row_index,
+        sample_id=sample_id,
+    )
+    record = {
+        "uid": f"nq_{sample_id}",
+        "source": "nq",
+        "source_split": split,
+        "question": cleaned_question,
+        "gold_answers": cleaned_answers,
+        "metadata": {"original_id": sample_id},
     }
-    seen_uids = set()
-    processed = 0
+    return record, int(cleaned_question != question), normalized_answers, duplicate_answers
+
+
+def process_split(
+    split_dataset: Any,
+    split: str,
+    output_path: Path,
+    max_samples: int | None,
+    seen_uids: set[str],
+) -> dict[str, int]:
+    temporary_path = output_path.with_name(f".{output_path.name}.tmp")
+    statistics = {
+        "read": 0,
+        "written": 0,
+        "normalized_questions": 0,
+        "normalized_answers": 0,
+        "duplicate_answers_removed": 0,
+    }
 
     try:
         with temporary_path.open("w", encoding="utf-8", newline="\n") as output_file:
-            stop = False
-            for split, split_dataset in dataset.items():
-                for sample in split_dataset:
-                    if max_samples is not None and processed >= max_samples:
-                        stop = True
-                        break
-
-                    processed += 1
-                    stats = split_stats[split]
-                    stats["total"] += 1
-                    transformed, drop_reason = transform_sample(sample, split)
-                    if drop_reason is not None:
-                        stats["dropped"] += 1
-                        stats["drop_reasons"][drop_reason] += 1
-                        continue
-
-                    uid = transformed["uid"]
-                    if uid in seen_uids:
-                        raise ValueError(f"Duplicate uid detected: {uid}")
-                    seen_uids.add(uid)
-
-                    output_file.write(json.dumps(transformed, ensure_ascii=False) + "\n")
-                    stats["kept"] += 1
-
-                if stop:
+            for row_index, sample in enumerate(split_dataset):
+                if max_samples is not None and row_index >= max_samples:
                     break
+
+                statistics["read"] += 1
+                (
+                    record,
+                    normalized_questions,
+                    normalized_answers,
+                    duplicate_answers,
+                ) = transform_sample(sample, split, row_index)
+
+                uid = record["uid"]
+                if uid in seen_uids:
+                    raise ValueError(
+                        f"Duplicate uid (split={split}, row={row_index}, "
+                        f"id={sample.get('id')!r}): {uid}"
+                    )
+                seen_uids.add(uid)
+
+                output_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                statistics["written"] += 1
+                statistics["normalized_questions"] += normalized_questions
+                statistics["normalized_answers"] += normalized_answers
+                statistics["duplicate_answers_removed"] += duplicate_answers
 
         os.replace(temporary_path, output_path)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise
 
-    overall = {
-        key: sum(stats[key] for stats in split_stats.values())
-        for key in ("total", "kept", "dropped")
-    }
-    return {"splits": split_stats, "overall": overall}
-
-
-def print_statistics(statistics: Dict[str, Any], output_path: Path) -> None:
-    print("Processing statistics")
-    for split, stats in statistics["splits"].items():
-        line = (
-            f"  {split}: total={stats['total']}, kept={stats['kept']}, "
-            f"dropped={stats['dropped']}"
-        )
-        if stats["drop_reasons"]:
-            reasons = ", ".join(
-                f"{reason}={count}" for reason, count in sorted(stats["drop_reasons"].items())
-            )
-            line += f" ({reasons})"
-        print(line)
-
-    overall = statistics["overall"]
-    print(
-        f"  overall: total={overall['total']}, kept={overall['kept']}, "
-        f"dropped={overall['dropped']}"
-    )
-    print(f"Output: {output_path}")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--output_path",
-        type=Path,
-        default=Path("data/processed/nq_clean.jsonl"),
-        help="Destination JSONL path (default: data/processed/nq_clean.jsonl).",
-    )
-    parser.add_argument(
-        "--max_samples",
-        type=int,
-        default=None,
-        help="Debug-only global limit on source samples; do not use for experiment splitting.",
-    )
-    args = parser.parse_args()
-    if args.max_samples is not None and args.max_samples <= 0:
-        parser.error("--max_samples must be a positive integer")
-    return args
+    return statistics
 
 
 def main() -> None:
     args = parse_args()
-    try:
-        from datasets import load_dataset
-    except ImportError as error:
-        raise SystemExit(
-            "Missing dependency 'datasets'. Install project requirements with "
-            "`python -m pip install -r requirements.txt`."
-        ) from error
+
+    from datasets import load_dataset
 
     dataset = load_dataset(DATASET_NAME, DATASET_CONFIG)
     validate_source_schema(dataset)
-    statistics = process_dataset(dataset, args.output_path, args.max_samples)
-    print_statistics(statistics, args.output_path)
+
+    output_paths = {
+        split: args.output_dir / f"{split}.jsonl" for split in REQUIRED_SPLITS
+    }
+    existing_paths = [path for path in output_paths.values() if path.exists()]
+    if existing_paths and not args.overwrite:
+        paths = ", ".join(str(path) for path in existing_paths)
+        raise FileExistsError(
+            f"Output file(s) already exist: {paths}. Pass --overwrite to replace them."
+        )
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    seen_uids: set[str] = set()
+    all_statistics: dict[str, dict[str, int]] = {}
+
+    for split in REQUIRED_SPLITS:
+        statistics = process_split(
+            dataset[split],
+            split,
+            output_paths[split],
+            args.max_samples_per_split,
+            seen_uids,
+        )
+        all_statistics[split] = statistics
+        print(
+            f"{split}: read={statistics['read']}, written={statistics['written']}, "
+            f"normalized_questions={statistics['normalized_questions']}, "
+            f"normalized_answers={statistics['normalized_answers']}, "
+            f"duplicate_answers_removed={statistics['duplicate_answers_removed']}"
+        )
+
+    totals = {
+        key: sum(statistics[key] for statistics in all_statistics.values())
+        for key in next(iter(all_statistics.values()))
+    }
+    print(
+        f"overall: read={totals['read']}, written={totals['written']}, "
+        f"normalized_questions={totals['normalized_questions']}, "
+        f"normalized_answers={totals['normalized_answers']}, "
+        f"duplicate_answers_removed={totals['duplicate_answers_removed']}"
+    )
 
 
 if __name__ == "__main__":
