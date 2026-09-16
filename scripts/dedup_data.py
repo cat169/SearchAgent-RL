@@ -4,6 +4,7 @@ import argparse
 import json
 import random
 import re
+import sys
 import unicodedata
 from collections import Counter, defaultdict
 from functools import lru_cache
@@ -851,7 +852,7 @@ def build_near_duplicate_audit(
 # Main
 # ============================================================
 
-def parse_args() -> argparse.Namespace:
+def parse_audit_args(arguments: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Audit exact and near question duplicates across "
@@ -929,12 +930,10 @@ def parse_args() -> argparse.Namespace:
         default=123,
     )
 
-    return parser.parse_args()
+    return parser.parse_args(arguments)
 
 
-def main() -> None:
-    args = parse_args()
-
+def run_audit(args: argparse.Namespace) -> None:
     if args.num_perm < 1:
         raise ValueError("--num_perm must be >= 1")
 
@@ -1120,6 +1119,318 @@ def main() -> None:
         "NOTE: No formal dataset was deleted, merged, "
         "or split by this script."
     )
+
+
+# ============================================================
+# Manual review candidate generation
+# ============================================================
+
+MANUAL_INPUT_PATH = Path(
+    "data/processed/dedup_audit/near_duplicate_candidates.jsonl"
+)
+MANUAL_OUTPUT_PATH = Path(
+    "data/processed/dedup_audit/manual_review_candidates.jsonl"
+)
+
+
+def build_manual_review_candidates() -> None:
+    candidates = []
+
+    for candidate in read_jsonl(MANUAL_INPUT_PATH):
+        left = candidate["left"]
+        right = candidate["right"]
+        jaccard = candidate["jaccard"]
+
+        if left["source"] != right["source"]:
+            review_group = "cross_source"
+        elif jaccard >= 0.90:
+            review_group = "same_source_high_similarity"
+        else:
+            continue
+
+        candidates.append(
+            {
+                "review_group": review_group,
+                "jaccard": jaccard,
+                "left": {
+                    "uid": left["id"],
+                    "source": left["source"],
+                    "question": left["question"],
+                    "answers": left["answers"],
+                },
+                "right": {
+                    "uid": right["id"],
+                    "source": right["source"],
+                    "question": right["question"],
+                    "answers": right["answers"],
+                },
+                "review": None,
+            }
+        )
+
+    group_order = {
+        "cross_source": 0,
+        "same_source_high_similarity": 1,
+    }
+    candidates.sort(
+        key=lambda item: (
+            group_order[item["review_group"]],
+            -item["jaccard"],
+        )
+    )
+
+    pair_counts = Counter()
+    group_counts = Counter()
+    output_rows = []
+
+    for pair_id, candidate in enumerate(candidates):
+        candidate = {"pair_id": pair_id, **candidate}
+        output_rows.append(candidate)
+        group_counts[candidate["review_group"]] += 1
+        pair_counts[
+            make_source_pair(
+                candidate["left"]["source"],
+                candidate["right"]["source"],
+            )
+        ] += 1
+
+    write_jsonl(MANUAL_OUTPUT_PATH, output_rows)
+    null_review_count = sum(
+        candidate["review"] is None for candidate in candidates
+    )
+
+    print(f"Total manual review candidates: {len(candidates)}")
+    print(f"Cross-source candidates: {group_counts['cross_source']}")
+    print(
+        "Same-source high-similarity candidates: "
+        f"{group_counts['same_source_high_similarity']}"
+    )
+    print()
+    for pair, count in sorted(pair_counts.items()):
+        print(f"{pair}: {count}")
+    print()
+    print(f"review == null: {null_review_count}")
+    print(f"Output: {MANUAL_OUTPUT_PATH}")
+
+
+# ============================================================
+# Unique QA pool generation
+# ============================================================
+
+UNIQUE_DATASET_DIRS = {
+    "nq": Path("data/processed/nq"),
+    "hotpotqa": Path("data/processed/hotpotqa"),
+    "aethersearch": Path("data/processed/aethersearch"),
+}
+REVIEW_PATH = Path(
+    "data/processed/dedup_audit/manual_review_candidates_reviewed.jsonl"
+)
+UNIFIED_OUTPUT_DIR = Path("data/processed/unified")
+POOL_PATH = UNIFIED_OUTPUT_DIR / "unique_qa_pool.jsonl"
+MANIFEST_PATH = UNIFIED_OUTPUT_DIR / "dedup_manifest.jsonl"
+
+
+def load_unique_records(source: str, directory: Path) -> list[dict]:
+    records = []
+
+    for path in sorted(directory.glob("*.jsonl")):
+        for item in read_jsonl(path):
+            if source == "aethersearch":
+                record = {
+                    "uid": item["id"],
+                    "source": source,
+                    "source_split": item.get("source_split", path.stem),
+                    "question": item["question"],
+                    "gold_answers": item["answers"],
+                    "metadata": {
+                        "trajectory_type": item["trajectory_type"],
+                        "search_count": item["search_count"],
+                    },
+                }
+            else:
+                record = {
+                    "uid": item["uid"],
+                    "source": item["source"],
+                    "source_split": item["source_split"],
+                    "question": item["question"],
+                    "gold_answers": item["gold_answers"],
+                    "metadata": item["metadata"],
+                }
+            records.append(record)
+
+    return records
+
+
+def build_unique_qa_pool() -> None:
+    records = []
+    input_counts = {}
+
+    for source, directory in UNIQUE_DATASET_DIRS.items():
+        source_records = load_unique_records(source, directory)
+        records.extend(source_records)
+        input_counts[source] = len(source_records)
+
+    records_by_uid = {record["uid"]: record for record in records}
+    if len(records_by_uid) != len(records):
+        raise ValueError("Input uids are not globally unique")
+
+    parent = {uid: uid for uid in records_by_uid}
+
+    def find(uid: str) -> str:
+        while parent[uid] != uid:
+            parent[uid] = parent[parent[uid]]
+            uid = parent[uid]
+        return uid
+
+    def union(left_uid: str, right_uid: str) -> None:
+        left_root = find(left_uid)
+        right_root = find(right_uid)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    normalized_groups = defaultdict(list)
+    for record in records:
+        normalized_groups[normalize_question(record["question"])].append(
+            record["uid"]
+        )
+
+    exact_groups = [
+        uids for uids in normalized_groups.values() if len(uids) > 1
+    ]
+    evidence_relations = []
+    for uids in exact_groups:
+        for uid in uids[1:]:
+            union(uids[0], uid)
+            evidence_relations.append((uids[0], uid, "exact_duplicate"))
+
+    manual_duplicate_pairs = 0
+    for reviewed in read_jsonl(REVIEW_PATH):
+        left_uid = reviewed["left"]["uid"]
+        right_uid = reviewed["right"]["uid"]
+        if left_uid not in records_by_uid or right_uid not in records_by_uid:
+            raise ValueError(
+                f"Reviewed pair references unknown uid: "
+                f"{left_uid}, {right_uid}"
+            )
+        if reviewed["review"] == "duplicate":
+            union(left_uid, right_uid)
+            evidence_relations.append(
+                (left_uid, right_uid, "manual_duplicate")
+            )
+            manual_duplicate_pairs += 1
+
+    components = defaultdict(list)
+    for uid in records_by_uid:
+        components[find(uid)].append(uid)
+
+    evidence_by_component = defaultdict(set)
+    for left_uid, _, evidence in evidence_relations:
+        evidence_by_component[find(left_uid)].add(evidence)
+
+    unique_records = []
+    manifests = []
+    removed_uids = set()
+
+    for member_uids in components.values():
+        aethersearch_uids = [
+            uid
+            for uid in member_uids
+            if records_by_uid[uid]["source"] == "aethersearch"
+        ]
+        canonical_uid = min(aethersearch_uids or member_uids)
+        unique_records.append(records_by_uid[canonical_uid])
+
+        if len(member_uids) > 1:
+            removed = sorted(
+                uid for uid in member_uids if uid != canonical_uid
+            )
+            removed_uids.update(removed)
+            manifests.append(
+                {
+                    "canonical_uid": canonical_uid,
+                    "canonical_source": records_by_uid[canonical_uid][
+                        "source"
+                    ],
+                    "removed_uids": removed,
+                    "members": [
+                        {
+                            "uid": uid,
+                            "source": records_by_uid[uid]["source"],
+                            "question": records_by_uid[uid]["question"],
+                            "gold_answers": records_by_uid[uid][
+                                "gold_answers"
+                            ],
+                        }
+                        for uid in sorted(member_uids)
+                    ],
+                    "evidence": sorted(
+                        evidence_by_component[find(canonical_uid)]
+                    ),
+                }
+            )
+
+    unique_records.sort(key=lambda record: record["uid"])
+    manifests.sort(key=lambda manifest: manifest["canonical_uid"])
+    unique_uids = {record["uid"] for record in unique_records}
+
+    if len(unique_uids) != len(unique_records):
+        raise ValueError("Unique pool contains duplicate uids")
+    if removed_uids & unique_uids:
+        raise ValueError("Removed uid remains in unique pool")
+    if any(m["canonical_uid"] not in unique_uids for m in manifests):
+        raise ValueError("Manifest canonical uid is missing from unique pool")
+    if len(records) != len(unique_records) + len(removed_uids):
+        raise ValueError("Input/unique/removed record counts are inconsistent")
+
+    write_jsonl(POOL_PATH, unique_records)
+    write_jsonl(MANIFEST_PATH, manifests)
+    remaining_counts = Counter(record["source"] for record in unique_records)
+
+    print("=" * 60)
+    print("Unique QA Pool Build Completed")
+    print("=" * 60)
+    print("Input records:")
+    print(f"  NQ           : {input_counts['nq']}")
+    print(f"  HotpotQA     : {input_counts['hotpotqa']}")
+    print(f"  AetherSearch : {input_counts['aethersearch']}")
+    print(f"  Total        : {len(records)}")
+    print()
+    print(f"Exact duplicate groups       : {len(exact_groups)}")
+    print(f"Manual duplicate pairs used : {manual_duplicate_pairs}")
+    print(f"Final duplicate components  : {len(manifests)}")
+    print(f"Records removed             : {len(removed_uids)}")
+    print(f"Unique QA records           : {len(unique_records)}")
+    print()
+    print("Remaining by source:")
+    print(f"  NQ           : {remaining_counts['nq']}")
+    print(f"  HotpotQA     : {remaining_counts['hotpotqa']}")
+    print(f"  AetherSearch : {remaining_counts['aethersearch']}")
+    print()
+    print("Output:")
+    print(f"  {POOL_PATH}")
+    print(f"  {MANIFEST_PATH}")
+
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        raise SystemExit(
+            "Usage: python scripts/dedup_data.py "
+            "{audit|manual-review|unique-pool}"
+        )
+
+    stage = sys.argv[1]
+    if stage == "audit":
+        run_audit(parse_audit_args(sys.argv[2:]))
+    elif stage == "manual-review":
+        if len(sys.argv) != 2:
+            raise SystemExit("manual-review does not accept arguments")
+        build_manual_review_candidates()
+    elif stage == "unique-pool":
+        if len(sys.argv) != 2:
+            raise SystemExit("unique-pool does not accept arguments")
+        build_unique_qa_pool()
+    else:
+        raise SystemExit(f"Unknown dedup stage: {stage}")
 
 
 if __name__ == "__main__":

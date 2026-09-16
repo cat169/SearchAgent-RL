@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import json
+import random
 import re
 import sys
 from pathlib import Path
@@ -12,19 +14,20 @@ sys.path.insert(0, str(ROOT))
 from agent.environment import SearchEnvironment
 from agent.loop import AgentLoop
 from agent.protocol import parse_action
-from agent.tools.search_tool import SearchTool
+from agent.search_tool import SearchTool
 from retrieval.bm25_retriever import BM25Retriever
-from teacher.deepseek_teacher_model import DeepSeekTeacherModel
+from teacher.deepseek_teacher import DeepSeekTeacherModel
 
 
-SMOKE_COUNT = 5
+PILOT_PER_SOURCE = 50
+SEED = 123
 MAX_TURNS = 5
 TOP_K = 3
+TEACHER_CANDIDATES_PATH = Path(
+    "data/processed/splits/teacher_sft_candidates.jsonl"
+)
 PILOT_PATH = Path(
     "data/processed/teacher/pilot_teacher_candidates.jsonl"
-)
-OUTPUT_PATH = Path(
-    "data/processed/teacher/smoke_teacher_trajectories.jsonl"
 )
 INDEX_PATH = "data/retrieval/wiki-18-bm25-index/bm25"
 CORPUS_PATH = "data/retrieval/wiki-18-corpus/wiki-18.jsonl"
@@ -85,26 +88,60 @@ def extract_events(
     return events
 
 
-def main() -> None:
-    if not PILOT_PATH.exists():
-        raise FileNotFoundError(f"Pilot file does not exist: {PILOT_PATH}")
+def build_pilot() -> list[dict]:
+    with TEACHER_CANDIDATES_PATH.open(
+        "r", encoding="utf-8"
+    ) as input_file:
+        records = [json.loads(line) for line in input_file if line.strip()]
 
-    with PILOT_PATH.open("r", encoding="utf-8") as input_file:
-        pilot = [json.loads(line) for line in input_file if line.strip()]
+    pilot = []
+    for source in ["nq", "hotpotqa"]:
+        source_records = sorted(
+            (record for record in records if record["source"] == source),
+            key=lambda record: record["uid"],
+        )
+        random.Random(SEED).shuffle(source_records)
+        selected = source_records[:PILOT_PER_SOURCE]
+        if len(selected) != PILOT_PER_SOURCE:
+            raise ValueError(f"Not enough {source} records for pilot")
+        pilot.extend(selected)
+
+    pilot.sort(key=lambda record: record["uid"])
+    PILOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with PILOT_PATH.open("w", encoding="utf-8") as output_file:
+        for record in pilot:
+            output_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    return pilot
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, choices=[5, 100], default=5)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    pilot = build_pilot()
+
+    output_path = Path(
+        "data/processed/teacher/smoke_teacher_trajectories.jsonl"
+        if args.limit == 5
+        else "data/processed/teacher/pilot_teacher_trajectories.jsonl"
+    )
 
     nq_records = [record for record in pilot if record["source"] == "nq"]
     hotpotqa_records = [
         record for record in pilot if record["source"] == "hotpotqa"
     ]
-    if len(nq_records) < 3 or len(hotpotqa_records) < 2:
-        raise ValueError("Pilot does not contain 3 NQ and 2 HotpotQA records")
-
-    smoke_records = sorted(
-        nq_records[:3] + hotpotqa_records[:2],
-        key=lambda record: record["uid"],
-    )
-    if len(smoke_records) != SMOKE_COUNT:
-        raise ValueError(f"Expected {SMOKE_COUNT} smoke records")
+    if args.limit == 5:
+        selected_records = sorted(
+            nq_records[:3] + hotpotqa_records[:2],
+            key=lambda record: record["uid"],
+        )
+    else:
+        selected_records = pilot
 
     model = DeepSeekTeacherModel()
     retriever = BM25Retriever(
@@ -122,7 +159,7 @@ def main() -> None:
     )
 
     outputs = []
-    for record in smoke_records:
+    for record in selected_records:
         model.raw_turns.clear()
         result = loop.run(f"Question: {record['question']}\n")
         events = extract_events(model.raw_turns, result.trajectory)
@@ -173,12 +210,12 @@ def main() -> None:
             f"termination={result.termination_reason}"
         )
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with OUTPUT_PATH.open("w", encoding="utf-8") as output_file:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as output_file:
         for output in outputs:
             output_file.write(json.dumps(output, ensure_ascii=False) + "\n")
 
-    print(f"Saved {len(outputs)} trajectories to {OUTPUT_PATH}")
+    print(f"Saved {len(outputs)} trajectories to {output_path}")
 
 
 if __name__ == "__main__":

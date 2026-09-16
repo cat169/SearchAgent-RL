@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from agent.protocol import AgentAction, parse_action
-from agent.tools.search_tool import SearchTool
+from agent.search_tool import SearchTool
 
 
 INVALID_ACTION_OBSERVATION = (
