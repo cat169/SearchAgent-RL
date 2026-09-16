@@ -15,7 +15,10 @@ from agent.environment import SearchEnvironment
 from agent.loop import AgentLoop, AgentStep
 from agent.search_tool import SearchTool
 from retrieval.bm25_retriever import BM25Retriever
-from teacher.deepseek_teacher import DeepSeekTeacherModel
+from teacher.deepseek_teacher import (
+    DeepSeekTeacherModel,
+    EmptyVisibleContentError,
+)
 
 
 PILOT_PER_SOURCE = 50
@@ -110,7 +113,9 @@ def build_pilot() -> list[dict]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, choices=[5, 100], default=5)
+    parser.add_argument(
+        "--limit", type=int, choices=[5, 100, 4000], default=5
+    )
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
@@ -132,39 +137,117 @@ def load_completed_ids(output_path: Path) -> set[str]:
     return completed_ids
 
 
+def load_empty_skipped_ids(skipped_path: Path) -> set[str]:
+    skipped_ids = set()
+
+    with skipped_path.open("r", encoding="utf-8") as skipped_file:
+        for line in skipped_file:
+            skipped_id = line.strip()
+            if not skipped_id:
+                continue
+            if skipped_id in skipped_ids:
+                raise ValueError(
+                    f"Duplicate id in empty skipped file: {skipped_id}"
+                )
+            skipped_ids.add(skipped_id)
+
+    return skipped_ids
+
+
 def main() -> None:
     args = parse_args()
-    pilot = build_pilot()
 
-    output_path = Path(
-        "data/processed/teacher/smoke_teacher_trajectories.jsonl"
-        if args.limit == 5
-        else "data/processed/teacher/pilot_teacher_trajectories.jsonl"
-    )
-
-    nq_records = [record for record in pilot if record["source"] == "nq"]
-    hotpotqa_records = [
-        record for record in pilot if record["source"] == "hotpotqa"
-    ]
-    if args.limit == 5:
-        selected_records = sorted(
-            nq_records[:3] + hotpotqa_records[:2],
-            key=lambda record: record["uid"],
+    if args.limit == 4000:
+        with TEACHER_CANDIDATES_PATH.open(
+            "r", encoding="utf-8"
+        ) as input_file:
+            selected_records = [
+                json.loads(line) for line in input_file if line.strip()
+            ]
+        nq_count = sum(
+            record["source"] == "nq" for record in selected_records
         )
+        hotpotqa_count = sum(
+            record["source"] == "hotpotqa"
+            for record in selected_records
+        )
+        if (
+            len(selected_records) != 4000
+            or nq_count != 2000
+            or hotpotqa_count != 2000
+        ):
+            raise ValueError(
+                "Expected 4000 Teacher candidates: "
+                "NQ=2000 and HotpotQA=2000"
+            )
     else:
-        selected_records = pilot
+        pilot = build_pilot()
+        nq_records = [
+            record for record in pilot if record["source"] == "nq"
+        ]
+        hotpotqa_records = [
+            record for record in pilot if record["source"] == "hotpotqa"
+        ]
+        if args.limit == 5:
+            selected_records = sorted(
+                nq_records[:3] + hotpotqa_records[:2],
+                key=lambda record: record["uid"],
+            )
+        else:
+            selected_records = pilot
+
+    output_paths = {
+        5: Path(
+            "data/processed/teacher/smoke_teacher_trajectories.jsonl"
+        ),
+        100: Path(
+            "data/processed/teacher/pilot_teacher_trajectories.jsonl"
+        ),
+        4000: Path(
+            "data/processed/teacher/raw_teacher_trajectories.jsonl"
+        ),
+    }
+    skipped_paths = {
+        5: Path(
+            "data/processed/teacher/"
+            "smoke_teacher_empty_skipped_ids.txt"
+        ),
+        100: Path(
+            "data/processed/teacher/"
+            "pilot_teacher_empty_skipped_ids.txt"
+        ),
+        4000: Path(
+            "data/processed/teacher/"
+            "raw_teacher_empty_skipped_ids.txt"
+        ),
+    }
+    output_path = output_paths[args.limit]
+    skipped_path = skipped_paths[args.limit]
 
     completed_ids = set()
+    empty_skipped_ids = set()
     if args.resume and output_path.exists():
         completed_ids = load_completed_ids(output_path)
+    if args.resume and skipped_path.exists():
+        empty_skipped_ids = load_empty_skipped_ids(skipped_path)
+    conflicting_ids = completed_ids & empty_skipped_ids
+    if conflicting_ids:
+        raise ValueError(
+            "Ids exist in both trajectory and empty skipped files: "
+            f"{sorted(conflicting_ids)}"
+        )
+    processed_ids = completed_ids | empty_skipped_ids
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_mode = "a" if args.resume else "w"
     written_count = 0
+    new_empty_skipped_count = 0
 
     with output_path.open(
         output_mode, encoding="utf-8"
-    ) as output_file:
+    ) as output_file, skipped_path.open(
+        output_mode, encoding="utf-8"
+    ) as skipped_file:
         model = DeepSeekTeacherModel()
         retriever = BM25Retriever(
             index_path=INDEX_PATH,
@@ -181,11 +264,22 @@ def main() -> None:
         )
 
         for record in selected_records:
-            if record["uid"] in completed_ids:
+            if record["uid"] in processed_ids:
                 continue
 
             model.raw_turns.clear()
-            result = loop.run(f"Question: {record['question']}\n")
+            try:
+                result = loop.run(f"Question: {record['question']}\n")
+            except EmptyVisibleContentError:
+                skipped_file.write(record["uid"] + "\n")
+                skipped_file.flush()
+                new_empty_skipped_count += 1
+                print(
+                    f"{record['uid']}: skipped, "
+                    "reason=empty_visible_content"
+                )
+                continue
+
             events = extract_events(model.raw_turns, result.steps)
             event_search_count = sum(
                 event["type"] == "search" for event in events
@@ -234,9 +328,11 @@ def main() -> None:
                 f"termination={result.termination_reason}"
             )
 
-    print(
-        f"Saved {written_count} new trajectories to {output_path}"
-    )
+    print(f"Selected: {len(selected_records)}")
+    print(f"Existing trajectories: {len(completed_ids)}")
+    print(f"Existing empty skipped: {len(empty_skipped_ids)}")
+    print(f"Saved trajectories: {written_count}")
+    print(f"Skipped empty responses: {new_empty_skipped_count}")
 
 
 if __name__ == "__main__":

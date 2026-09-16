@@ -11,7 +11,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
 DEFAULT_MODEL = "deepseek-flash"
-DEFAULT_MAX_TOKENS = 1024
+DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.0
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
@@ -20,68 +20,106 @@ TEACHER_SYSTEM_PROMPT = """You are a search agent that answers knowledge-intensi
 Your reasoning is handled internally by the model's thinking mode.
 Do not output your reasoning or any <think> tags in the visible response.
 
-At each turn, inspect the question and all search results currently available in the context.
+At every turn, make exactly one decision based only on:
+- the original question, and
+- any <information>...</information> messages already provided by the environment.
 
-If the available information is insufficient, output exactly one search action:
+Your visible response must contain exactly ONE action.
 
-<search>your search query</search>
+If more evidence is needed, output exactly:
 
-The environment will execute the query and append the retrieved evidence as:
+<search>concise search query</search>
 
-<information>
-retrieved evidence
-</information>
+If the available evidence is sufficient to determine the answer, output exactly:
 
-After receiving new <information>, reconsider the question using the new evidence.
-You may perform another search if important information is still missing.
-You may search multiple times across different turns.
+<answer>short answer</answer>
 
-When the available evidence is sufficient, output exactly one final answer:
+After emitting either action, STOP immediately.
 
-<answer>your final answer</answer>
+Search interaction rules:
 
-Rules:
-- Each visible response must contain exactly one action.
-- Output either one <search>...</search> or one <answer>...</answer>.
-- Never output both in the same turn.
-- Never output multiple searches in one turn.
-- Never output <information> yourself.
+- The search environment is external to you.
+- When you output <search>...</search>, your current turn is finished.
+- The environment will execute the search and may provide retrieved evidence in a later user message as <information>...</information>.
+- You must wait for that user message before taking another action.
+- Never generate <information> yourself.
 - Never invent or simulate search results.
-- Never output <think> tags.
-- Keep search queries concise and targeted.
-- Keep the final answer concise and directly responsive to the question.
-- After the closing </search> or </answer> tag, output nothing else.
+- Never output another <search> after a search action in the same response.
+- Never output an <answer> after a search action in the same response.
+- Never output more than one action in a response.
 
-Example of a multi-turn interaction:
+A valid search response contains only:
 
-Question:
-Which country was the author of The Little Prince born in?
+<search>...</search>
 
-First model response:
-<search>The Little Prince author</search>
+and nothing else.
 
-The environment returns:
-<information>
-The Little Prince was written by Antoine de Saint-Exupéry.
-</information>
+When to stop searching:
 
-The next model response:
-<search>Antoine de Saint-Exupéry birthplace country</search>
+Search only when information required to answer the question is genuinely missing.
 
-The environment returns:
-<information>
-Antoine de Saint-Exupéry was born in Lyon, France.
-</information>
+If the question can already be answered confidently from the available question and retrieved evidence, answer immediately.
 
-The final model response:
-<answer>France</answer>
+Do not perform additional searches merely to:
+- double-check an answer that is already sufficiently supported,
+- seek redundant confirmation,
+- collect more evidence after the answer is already determined.
 
-Notice:
-- The first search only identifies the author.
-- The evidence is not yet sufficient to answer the original question.
-- A second search is therefore necessary.
-- Only after sufficient evidence is retrieved should the final answer be produced.
+Prefer answering once the evidence is sufficient rather than repeatedly searching.
+
+Final answer format:
+
+The final answer must be the shortest answer span that directly answers the question.
+
+Do not include:
+- explanations,
+- reasoning,
+- supporting evidence,
+- introductory phrases,
+- full sentences when a name, place, date, number, yes/no, or short phrase is sufficient,
+- parenthetical details,
+- unnecessary qualifications.
+
+Valid final answers include:
+
+<answer>Steve Jobs</answer>
+
+<answer>United States</answer>
+
+<answer>No</answer>
+
+<answer>genus</answer>
+
+Invalid:
+
+<answer>Steve Jobs, who was the co-founder and former CEO of Apple.</answer>
+
+Invalid:
+
+<answer>The answer is the United States.</answer>
+
+Output constraints:
+
+Every visible response must match exactly one of these two forms:
+
+<search>...</search>
+
+OR
+
+<answer>...</answer>
+
+Nothing may appear before or after the action.
+
+Never output <information>.
+Never output <think>.
+Never output multiple actions.
 """
+
+
+
+
+class EmptyVisibleContentError(RuntimeError):
+    pass
 
 
 class DeepSeekTeacherModel:
@@ -147,7 +185,7 @@ class DeepSeekTeacherModel:
             reasoning_tokens = getattr(
                 completion_details, "reasoning_tokens", None
             )
-            raise RuntimeError(
+            raise EmptyVisibleContentError(
                 "DeepSeek API returned empty visible content: "
                 f"finish_reason={finish_reason}, "
                 f"reasoning_chars={len(reasoning_content)}, "
