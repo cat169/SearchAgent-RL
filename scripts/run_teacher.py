@@ -12,8 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from agent.environment import SearchEnvironment
-from agent.loop import AgentLoop
-from agent.protocol import parse_action
+from agent.loop import AgentLoop, AgentStep
 from agent.search_tool import SearchTool
 from retrieval.bm25_retriever import BM25Retriever
 from teacher.deepseek_teacher import DeepSeekTeacherModel
@@ -43,11 +42,11 @@ INFORMATION_PATTERN = re.compile(
 
 def extract_events(
     raw_turns: list[dict[str, str]],
-    trajectory: str,
+    steps: list[AgentStep],
 ) -> list[dict[str, str]]:
     events = []
 
-    for index, turn in enumerate(raw_turns):
+    for turn, step in zip(raw_turns, steps):
         reasoning_content = turn["reasoning_content"].strip()
         if reasoning_content:
             events.append({"type": "think", "content": reasoning_content})
@@ -58,25 +57,19 @@ def extract_events(
                     {"type": "think", "content": think_matches[-1].strip()}
                 )
 
-        action = parse_action(turn["model_output"])
+        action = step.action
         if action.type not in {"search", "answer"}:
             continue
 
         events.append({"type": action.type, "content": action.content})
 
         if action.type == "search":
-            next_context = (
-                raw_turns[index + 1]["context"]
-                if index + 1 < len(raw_turns)
-                else trajectory
+            information_match = INFORMATION_PATTERN.fullmatch(
+                step.observation
             )
-            prefix = turn["context"] + turn["model_output"]
-            observation = next_context[len(prefix) :]
-            information_match = INFORMATION_PATTERN.fullmatch(observation)
             if information_match is None:
                 raise ValueError(
-                    f"Could not recover environment observation for turn "
-                    f"{index + 1}"
+                    "Could not unwrap environment observation"
                 )
             events.append(
                 {
@@ -162,7 +155,7 @@ def main() -> None:
     for record in selected_records:
         model.raw_turns.clear()
         result = loop.run(f"Question: {record['question']}\n")
-        events = extract_events(model.raw_turns, result.trajectory)
+        events = extract_events(model.raw_turns, result.steps)
         event_search_count = sum(
             event["type"] == "search" for event in events
         )
@@ -194,13 +187,7 @@ def main() -> None:
                 for turn in model.raw_turns
             ],
             "runtime": {
-                "done": result.done,
-                "turns": result.turns,
-                "search_count": result.search_count,
-                "valid_action_count": result.valid_action_count,
-                "invalid_action_count": result.invalid_action_count,
                 "termination_reason": result.termination_reason,
-                "final_answer": result.final_answer,
             },
         }
         outputs.append(output)

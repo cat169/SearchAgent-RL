@@ -4,23 +4,22 @@ from agent.protocol import AgentAction, parse_action
 from agent.search_tool import SearchTool
 
 
-INVALID_ACTION_OBSERVATION = (
-    "\nMy previous action is invalid. "
-    "If I want to search, I should put the query between "
-    "<search> and </search>. "
-    "If I want to give the final answer, I should put the answer between "
-    "<answer> and </answer>. "
-    "Let me try again.\n"
-)
-
-
 @dataclass
 class StepResult:
     action: AgentAction
     observation: str
-    done: bool
-    valid: bool
-    is_search: bool
+
+    @property
+    def valid(self) -> bool:
+        return self.action.type != "invalid"
+
+    @property
+    def done(self) -> bool:
+        return self.action.type == "answer"
+
+    @property
+    def is_search(self) -> bool:
+        return self.action.type == "search"
 
 
 class SearchEnvironment:
@@ -52,26 +51,17 @@ class SearchEnvironment:
             return StepResult(
                 action=action,
                 observation=observation,
-                done=False,
-                valid=True,
-                is_search=True,
             )
 
         if action.type == "answer":
             return StepResult(
                 action=action,
                 observation="",
-                done=True,
-                valid=True,
-                is_search=False,
             )
 
         return StepResult(
             action=action,
-            observation=INVALID_ACTION_OBSERVATION,
-            done=False,
-            valid=False,
-            is_search=False,
+            observation="",
         )
     
     def batch_step(
@@ -120,9 +110,6 @@ class SearchEnvironment:
                     StepResult(
                         action=action,
                         observation=observation,
-                        done=False,
-                        valid=True,
-                        is_search=True,
                     )
                 )
 
@@ -131,9 +118,6 @@ class SearchEnvironment:
                     StepResult(
                         action=action,
                         observation="",
-                        done=True,
-                        valid=True,
-                        is_search=False,
                     )
                 )
 
@@ -141,10 +125,7 @@ class SearchEnvironment:
                 results.append(
                     StepResult(
                         action=action,
-                        observation=INVALID_ACTION_OBSERVATION,
-                        done=False,
-                        valid=False,
-                        is_search=False,
+                        observation="",
                     )
                 )
 

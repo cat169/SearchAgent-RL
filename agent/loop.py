@@ -2,9 +2,10 @@ from dataclasses import dataclass
 from typing import Literal, Optional, Protocol
 
 from agent.environment import SearchEnvironment
+from agent.protocol import AgentAction
 
 
-TerminationReason = Literal["answer", "max_turns"]
+TerminationReason = Literal["answer", "invalid_action", "max_turns"]
 
 
 class AgentModel(Protocol):
@@ -13,15 +14,35 @@ class AgentModel(Protocol):
 
 
 @dataclass
+class AgentStep:
+    model_output: str
+    action: AgentAction
+    observation: str
+
+
+@dataclass
 class AgentLoopResult:
     trajectory: str
-    final_answer: Optional[str]
-    done: bool
-    turns: int
-    search_count: int
-    valid_action_count: int
-    invalid_action_count: int
+    steps: list[AgentStep]
     termination_reason: TerminationReason
+
+    @property
+    def turns(self) -> int:
+        return len(self.steps)
+
+    @property
+    def search_count(self) -> int:
+        return sum(step.action.type == "search" for step in self.steps)
+
+    @property
+    def done(self) -> bool:
+        return self.termination_reason == "answer"
+
+    @property
+    def final_answer(self) -> Optional[str]:
+        if self.termination_reason == "answer":
+            return self.steps[-1].action.content
+        return None
 
 
 class AgentLoop:
@@ -43,55 +64,41 @@ class AgentLoop:
         initial_context: str,
     ) -> AgentLoopResult:
         trajectory = initial_context
+        steps = []
 
-        search_count = 0
-        valid_action_count = 0
-        invalid_action_count = 0
-
-        for turn in range(1, self.max_turns + 1):
+        for _ in range(self.max_turns):
             model_output = self.model.generate(trajectory)
-
             trajectory += model_output
-
             step_result = self.environment.step(
                 model_output
             )
-
-            if step_result.valid:
-                valid_action_count += 1
-            else:
-                invalid_action_count += 1
-
-            if step_result.is_search:
-                search_count += 1
-
-            if step_result.done:
-                final_answer = (
-                    step_result.action.content
-                    if step_result.action.type == "answer"
-                    else None
+            steps.append(
+                AgentStep(
+                    model_output=model_output,
+                    action=step_result.action,
+                    observation=step_result.observation,
                 )
+            )
 
+            if step_result.action.type == "search":
+                trajectory += step_result.observation
+                continue
+
+            if step_result.action.type == "answer":
                 return AgentLoopResult(
                     trajectory=trajectory,
-                    final_answer=final_answer,
-                    done=True,
-                    turns=turn,
-                    search_count=search_count,
-                    valid_action_count=valid_action_count,
-                    invalid_action_count=invalid_action_count,
+                    steps=steps,
                     termination_reason="answer",
                 )
 
-            trajectory += step_result.observation
+            return AgentLoopResult(
+                trajectory=trajectory,
+                steps=steps,
+                termination_reason="invalid_action",
+            )
 
         return AgentLoopResult(
             trajectory=trajectory,
-            final_answer=None,
-            done=False,
-            turns=self.max_turns,
-            search_count=search_count,
-            valid_action_count=valid_action_count,
-            invalid_action_count=invalid_action_count,
+            steps=steps,
             termination_reason="max_turns",
         )
