@@ -217,6 +217,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Local retrieval resources
-data/retrieval/wiki-18-bm25-index/
-data/retrieval/wiki-18-corpus/
+# Local datasets and generated data artifacts
+data/*
+!data/processors/
+!data/processors/*.py
