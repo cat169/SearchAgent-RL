@@ -19,15 +19,21 @@ ACTION_PATTERN = re.compile(
 
 
 def parse_action(text: str) -> AgentAction:
-    matches = ACTION_PATTERN.findall(text)
-
-    if not matches:
+    if "<information>" in text or "</information>" in text:
         return AgentAction(
             type="invalid",
             content="",
         )
 
-    action_type, content = matches[-1]
+    matches = ACTION_PATTERN.findall(text)
+
+    if len(matches) != 1:
+        return AgentAction(
+            type="invalid",
+            content="",
+        )
+
+    action_type, content = matches[0]
     content = content.strip()
 
     if not content:
