@@ -15,32 +15,73 @@ DEFAULT_MAX_TOKENS = 1024
 DEFAULT_TEMPERATURE = 0.0
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
-TEACHER_SYSTEM_PROMPT = """You are a search agent that answers questions using an external search environment.
+TEACHER_SYSTEM_PROMPT = """You are a search agent that answers knowledge-intensive questions using an external search environment.
 
-At every turn:
+Your reasoning is handled internally by the model's thinking mode.
+Do not output your reasoning or any <think> tags in the visible response.
 
-1. First reason inside:
-<think>...</think>
+At each turn, inspect the question and all search results currently available in the context.
 
-2. If more external information is needed, output exactly one:
-<search>...</search>
+If the available information is insufficient, output exactly one search action:
 
-3. The environment will execute the search and provide:
-<information>...</information>
+<search>your search query</search>
 
-4. Never generate <information> yourself.
+The environment will execute the query and append the retrieved evidence as:
 
-5. After receiving information, reason again before deciding the next action.
+<information>
+retrieved evidence
+</information>
 
-6. When enough evidence is available, output exactly one:
-<answer>...</answer>
+After receiving new <information>, reconsider the question using the new evidence.
+You may perform another search if important information is still missing.
+You may search multiple times across different turns.
 
-A turn must end with exactly one action:
-either one <search>...</search>
-or one <answer>...</answer>.
+When the available evidence is sufficient, output exactly one final answer:
 
-Do not output multiple searches in the same turn.
-Do not output search and answer in the same turn."""
+<answer>your final answer</answer>
+
+Rules:
+- Each visible response must contain exactly one action.
+- Output either one <search>...</search> or one <answer>...</answer>.
+- Never output both in the same turn.
+- Never output multiple searches in one turn.
+- Never output <information> yourself.
+- Never invent or simulate search results.
+- Never output <think> tags.
+- Keep search queries concise and targeted.
+- Keep the final answer concise and directly responsive to the question.
+- After the closing </search> or </answer> tag, output nothing else.
+
+Example of a multi-turn interaction:
+
+Question:
+Which country was the author of The Little Prince born in?
+
+First model response:
+<search>The Little Prince author</search>
+
+The environment returns:
+<information>
+The Little Prince was written by Antoine de Saint-Exupéry.
+</information>
+
+The next model response:
+<search>Antoine de Saint-Exupéry birthplace country</search>
+
+The environment returns:
+<information>
+Antoine de Saint-Exupéry was born in Lyon, France.
+</information>
+
+The final model response:
+<answer>France</answer>
+
+Notice:
+- The first search only identifies the author.
+- The evidence is not yet sufficient to answer the original question.
+- A second search is therefore necessary.
+- Only after sufficient evidence is retrieved should the final answer be produced.
+"""
 
 
 class DeepSeekTeacherModel:
@@ -72,27 +113,29 @@ class DeepSeekTeacherModel:
             ],
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            reasoning_effort="high",
+            extra_body={
+                "thinking": {
+                    "type": "enabled",
+                }
+            },
         )
         message = response.choices[0].message
-        content = message.content
+        reasoning_content = (
+            getattr(message, "reasoning_content", None) or ""
+        ).strip()
+        content = (message.content or "").strip()
 
-        if not content or not content.strip():
+        if not content:
             raise RuntimeError("DeepSeek API returned an empty response")
-
-        reasoning_content = getattr(message, "reasoning_content", None) or ""
-        model_output = content
-        if reasoning_content.strip():
-            model_output = (
-                f"<think>{reasoning_content.strip()}</think>\n{content}"
-            )
 
         self.raw_turns.append(
             {
                 "context": context,
                 "reasoning_content": reasoning_content,
                 "content": content,
-                "model_output": model_output,
+                "model_output": content,
             }
         )
 
-        return model_output
+        return content
