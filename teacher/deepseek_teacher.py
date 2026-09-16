@@ -134,7 +134,26 @@ class DeepSeekTeacherModel:
         content = (message.content or "").strip()
 
         if not content:
-            raise RuntimeError("DeepSeek API returned an empty response")
+            finish_reason = getattr(
+                response.choices[0], "finish_reason", None
+            )
+            usage = getattr(response, "usage", None)
+            completion_tokens = getattr(
+                usage, "completion_tokens", None
+            )
+            completion_details = getattr(
+                usage, "completion_tokens_details", None
+            )
+            reasoning_tokens = getattr(
+                completion_details, "reasoning_tokens", None
+            )
+            raise RuntimeError(
+                "DeepSeek API returned empty visible content: "
+                f"finish_reason={finish_reason}, "
+                f"reasoning_chars={len(reasoning_content)}, "
+                f"completion_tokens={completion_tokens}, "
+                f"reasoning_tokens={reasoning_tokens}"
+            )
 
         self.raw_turns.append(
             {

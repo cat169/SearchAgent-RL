@@ -111,7 +111,25 @@ def build_pilot() -> list[dict]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, choices=[5, 100], default=5)
+    parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
+
+
+def load_completed_ids(output_path: Path) -> set[str]:
+    completed_ids = set()
+
+    with output_path.open("r", encoding="utf-8") as output_file:
+        for line in output_file:
+            if not line.strip():
+                continue
+            completed_id = json.loads(line)["id"]
+            if completed_id in completed_ids:
+                raise ValueError(
+                    f"Duplicate id in resume file: {completed_id}"
+                )
+            completed_ids.add(completed_id)
+
+    return completed_ids
 
 
 def main() -> None:
@@ -136,73 +154,89 @@ def main() -> None:
     else:
         selected_records = pilot
 
-    model = DeepSeekTeacherModel()
-    retriever = BM25Retriever(
-        index_path=INDEX_PATH,
-        corpus_path=CORPUS_PATH,
-        top_k=TOP_K,
-    )
-    environment = SearchEnvironment(
-        SearchTool(retriever=retriever, default_top_k=TOP_K)
-    )
-    loop = AgentLoop(
-        model=model,
-        environment=environment,
-        max_turns=MAX_TURNS,
-    )
-
-    outputs = []
-    for record in selected_records:
-        model.raw_turns.clear()
-        result = loop.run(f"Question: {record['question']}\n")
-        events = extract_events(model.raw_turns, result.steps)
-        event_search_count = sum(
-            event["type"] == "search" for event in events
-        )
-        information_count = sum(
-            event["type"] == "information" for event in events
-        )
-        if event_search_count != result.search_count:
-            raise ValueError(
-                f"Search count mismatch for {record['uid']}: "
-                f"events={event_search_count}, runtime={result.search_count}"
-            )
-        if information_count != event_search_count:
-            raise ValueError(
-                f"Information count mismatch for {record['uid']}"
-            )
-
-        output = {
-            "id": record["uid"],
-            "source": record["source"],
-            "split": "teacher_sft",
-            "question": record["question"],
-            "answers": record["gold_answers"],
-            "events": events,
-            "raw_model_turns": [
-                {
-                    "reasoning_content": turn["reasoning_content"],
-                    "content": turn["content"],
-                }
-                for turn in model.raw_turns
-            ],
-            "runtime": {
-                "termination_reason": result.termination_reason,
-            },
-        }
-        outputs.append(output)
-        print(
-            f"{record['uid']}: done={result.done}, "
-            f"turns={result.turns}, searches={result.search_count}, "
-            f"termination={result.termination_reason}"
-        )
+    completed_ids = set()
+    if args.resume and output_path.exists():
+        completed_ids = load_completed_ids(output_path)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as output_file:
-        for output in outputs:
-            output_file.write(json.dumps(output, ensure_ascii=False) + "\n")
+    output_mode = "a" if args.resume else "w"
+    written_count = 0
 
-    print(f"Saved {len(outputs)} trajectories to {output_path}")
+    with output_path.open(
+        output_mode, encoding="utf-8"
+    ) as output_file:
+        model = DeepSeekTeacherModel()
+        retriever = BM25Retriever(
+            index_path=INDEX_PATH,
+            corpus_path=CORPUS_PATH,
+            top_k=TOP_K,
+        )
+        environment = SearchEnvironment(
+            SearchTool(retriever=retriever, default_top_k=TOP_K)
+        )
+        loop = AgentLoop(
+            model=model,
+            environment=environment,
+            max_turns=MAX_TURNS,
+        )
+
+        for record in selected_records:
+            if record["uid"] in completed_ids:
+                continue
+
+            model.raw_turns.clear()
+            result = loop.run(f"Question: {record['question']}\n")
+            events = extract_events(model.raw_turns, result.steps)
+            event_search_count = sum(
+                event["type"] == "search" for event in events
+            )
+            information_count = sum(
+                event["type"] == "information" for event in events
+            )
+            if event_search_count != result.search_count:
+                raise ValueError(
+                    f"Search count mismatch for {record['uid']}: "
+                    f"events={event_search_count}, "
+                    f"runtime={result.search_count}"
+                )
+            if information_count != event_search_count:
+                raise ValueError(
+                    f"Information count mismatch for {record['uid']}"
+                )
+
+            output = {
+                "id": record["uid"],
+                "source": record["source"],
+                "split": "teacher_sft",
+                "question": record["question"],
+                "answers": record["gold_answers"],
+                "events": events,
+                "raw_model_turns": [
+                    {
+                        "reasoning_content": turn["reasoning_content"],
+                        "content": turn["content"],
+                    }
+                    for turn in model.raw_turns
+                ],
+                "runtime": {
+                    "termination_reason": result.termination_reason,
+                },
+            }
+            output_file.write(
+                json.dumps(output, ensure_ascii=False) + "\n"
+            )
+            output_file.flush()
+            written_count += 1
+
+            print(
+                f"{record['uid']}: done={result.done}, "
+                f"turns={result.turns}, searches={result.search_count}, "
+                f"termination={result.termination_reason}"
+            )
+
+    print(
+        f"Saved {written_count} new trajectories to {output_path}"
+    )
 
 
 if __name__ == "__main__":
