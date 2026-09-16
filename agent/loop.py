@@ -9,7 +9,10 @@ TerminationReason = Literal["answer", "invalid_action", "max_turns"]
 
 
 class AgentModel(Protocol):
-    def generate(self, context: str) -> str:
+    def generate(
+        self,
+        messages: list[dict[str, str]],
+    ) -> str:
         ...
 
 
@@ -22,7 +25,6 @@ class AgentStep:
 
 @dataclass
 class AgentLoopResult:
-    trajectory: str
     steps: list[AgentStep]
     termination_reason: TerminationReason
 
@@ -61,14 +63,24 @@ class AgentLoop:
 
     def run(
         self,
-        initial_context: str,
+        initial_user_content: str,
     ) -> AgentLoopResult:
-        trajectory = initial_context
+        messages = [
+            {
+                "role": "user",
+                "content": initial_user_content,
+            }
+        ]
         steps = []
 
         for _ in range(self.max_turns):
-            model_output = self.model.generate(trajectory)
-            trajectory += model_output
+            model_output = self.model.generate(messages)
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": model_output,
+                }
+            )
             step_result = self.environment.step(
                 model_output
             )
@@ -81,24 +93,26 @@ class AgentLoop:
             )
 
             if step_result.action.type == "search":
-                trajectory += step_result.observation
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": step_result.observation,
+                    }
+                )
                 continue
 
             if step_result.action.type == "answer":
                 return AgentLoopResult(
-                    trajectory=trajectory,
                     steps=steps,
                     termination_reason="answer",
                 )
 
             return AgentLoopResult(
-                trajectory=trajectory,
                 steps=steps,
                 termination_reason="invalid_action",
             )
 
         return AgentLoopResult(
-            trajectory=trajectory,
             steps=steps,
             termination_reason="max_turns",
         )

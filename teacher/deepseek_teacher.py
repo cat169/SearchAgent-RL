@@ -104,13 +104,20 @@ class DeepSeekTeacherModel:
             base_url=DEEPSEEK_BASE_URL,
         )
 
-    def generate(self, context: str) -> str:
+    def generate(
+        self,
+        messages: list[dict[str, str]],
+    ) -> str:
+        api_messages = [
+            {
+                "role": "system",
+                "content": TEACHER_SYSTEM_PROMPT,
+            },
+            *messages,
+        ]
         response = self.client.chat.completions.create(
             model=self.model,
-            messages=[
-                {"role": "system", "content": TEACHER_SYSTEM_PROMPT},
-                {"role": "user", "content": context},
-            ],
+            messages=api_messages,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             reasoning_effort="high",
@@ -131,10 +138,8 @@ class DeepSeekTeacherModel:
 
         self.raw_turns.append(
             {
-                "context": context,
                 "reasoning_content": reasoning_content,
                 "content": content,
-                "model_output": content,
             }
         )
 

@@ -46,7 +46,7 @@ def extract_events(
 ) -> list[dict[str, str]]:
     events = []
 
-    for turn, step in zip(raw_turns, steps):
+    for turn, step in zip(raw_turns, steps, strict=True):
         reasoning_content = turn["reasoning_content"].strip()
         if reasoning_content:
             events.append({"type": "think", "content": reasoning_content})
