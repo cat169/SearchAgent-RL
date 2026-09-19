@@ -16,6 +16,7 @@ SOURCE_TARGETS = {
     "hotpotqa": 1063,
     "aethersearch": 1024,
 }
+EXCLUDED_SFT_IDS = {"nq_train_37781"}
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -129,11 +130,15 @@ def main() -> None:
     narrow = build_narrow(records)
     standard = build_standard(records)
 
-    if len(narrow) != 2833:
-        raise ValueError(f"Expected 2833 Narrow records, got {len(narrow)}")
-    if len(standard) != 2833:
+    # 保持原始冻结抽样不变，只在最终输出中排除无 think 的轨迹。
+    narrow = [record for record in narrow if record["id"] not in EXCLUDED_SFT_IDS]
+    standard = [record for record in standard if record["id"] not in EXCLUDED_SFT_IDS]
+
+    if len(narrow) != 2832:
+        raise ValueError(f"Expected 2832 Narrow records, got {len(narrow)}")
+    if len(standard) != 2832:
         raise ValueError(
-            f"Expected 2833 Standard records, got {len(standard)}"
+            f"Expected 2832 Standard records, got {len(standard)}"
         )
 
     narrow_ids = {record["id"] for record in narrow}
@@ -155,7 +160,8 @@ def main() -> None:
     standard_sources = Counter(record["source"] for record in standard)
     if narrow_sources != standard_sources:
         raise ValueError("Narrow and Standard source counts differ")
-    if dict(standard_sources) != SOURCE_TARGETS:
+    final_source_targets = {**SOURCE_TARGETS, "nq": SOURCE_TARGETS["nq"] - 1}
+    if dict(standard_sources) != final_source_targets:
         raise ValueError(
             f"Unexpected Standard source counts: {standard_sources}"
         )

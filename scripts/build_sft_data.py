@@ -22,6 +22,11 @@ OUTPUT_FIELDS = {
     "search_count",
     "events",
 }
+THINK_PROTOCOL_TAGS = (
+    "<search>", "</search>",
+    "<information>", "</information>",
+    "<answer>", "</answer>",
+)
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -51,6 +56,19 @@ def validate_events(record: dict) -> int:
     return count_searches(events)
 
 
+def clean_think_events(events: list[dict]) -> list[dict]:
+    cleaned = []
+    for event in events:
+        if event["type"] == "think":
+            content = event["content"]
+            for tag in THINK_PROTOCOL_TAGS:
+                content = content.replace(tag, "")
+            cleaned.append({**event, "content": content})
+        else:
+            cleaned.append(event)
+    return cleaned
+
+
 def normalize_teacher(record: dict) -> dict:
     search_count = validate_events(record)
     return {
@@ -59,7 +77,7 @@ def normalize_teacher(record: dict) -> dict:
         "question": record["question"],
         "answers": record["answers"],
         "search_count": search_count,
-        "events": record["events"],
+        "events": clean_think_events(record["events"]),
     }
 
 
@@ -78,7 +96,7 @@ def normalize_aethersearch(record: dict) -> dict:
         "question": record["question"],
         "answers": record["answers"],
         "search_count": search_count,
-        "events": record["events"],
+        "events": clean_think_events(record["events"]),
     }
 
 
