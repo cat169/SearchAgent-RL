@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from teacher.deepseek_teacher import TEACHER_SYSTEM_PROMPT
+from agent.system_prompt import AGENT_SYSTEM_PROMPT
 
 
 NARROW_PATH = Path("data/processed/sft/narrow.jsonl")
@@ -29,7 +29,7 @@ PROTOCOL_TAGS = (
 
 def build_messages(record: dict) -> list[dict[str, str]]:
     messages = [
-        {"role": "system", "content": TEACHER_SYSTEM_PROMPT},
+        {"role": "system", "content": AGENT_SYSTEM_PROMPT},
         {"role": "user", "content": record["question"]},
     ]
     pending_reasoning = None

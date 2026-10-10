@@ -12,11 +12,10 @@ STANDARD_PATH = Path("data/processed/sft/standard.jsonl")
 SEED = 123
 
 SOURCE_TARGETS = {
-    "nq": 746,
-    "hotpotqa": 1063,
+    "nq": 745,
+    "hotpotqa": 1062,
     "aethersearch": 1024,
 }
-EXCLUDED_SFT_IDS = {"nq_train_37781"}
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -120,8 +119,8 @@ def print_split_statistics(name: str, records: list[dict]) -> None:
 
 def main() -> None:
     records = read_jsonl(INPUT_PATH)
-    if len(records) != 4250:
-        raise ValueError(f"Expected 4250 trajectories, got {len(records)}")
+    if len(records) != 4246:
+        raise ValueError(f"Expected 4246 trajectories, got {len(records)}")
 
     all_ids = [record["id"] for record in records]
     if len(set(all_ids)) != len(all_ids):
@@ -130,15 +129,11 @@ def main() -> None:
     narrow = build_narrow(records)
     standard = build_standard(records)
 
-    # 保持原始冻结抽样不变，只在最终输出中排除无 think 的轨迹。
-    narrow = [record for record in narrow if record["id"] not in EXCLUDED_SFT_IDS]
-    standard = [record for record in standard if record["id"] not in EXCLUDED_SFT_IDS]
-
-    if len(narrow) != 2832:
-        raise ValueError(f"Expected 2832 Narrow records, got {len(narrow)}")
-    if len(standard) != 2832:
+    if len(narrow) != 2831:
+        raise ValueError(f"Expected 2831 Narrow records, got {len(narrow)}")
+    if len(standard) != 2831:
         raise ValueError(
-            f"Expected 2832 Standard records, got {len(standard)}"
+            f"Expected 2831 Standard records, got {len(standard)}"
         )
 
     narrow_ids = {record["id"] for record in narrow}
@@ -160,8 +155,7 @@ def main() -> None:
     standard_sources = Counter(record["source"] for record in standard)
     if narrow_sources != standard_sources:
         raise ValueError("Narrow and Standard source counts differ")
-    final_source_targets = {**SOURCE_TARGETS, "nq": SOURCE_TARGETS["nq"] - 1}
-    if dict(standard_sources) != final_source_targets:
+    if dict(standard_sources) != SOURCE_TARGETS:
         raise ValueError(
             f"Unexpected Standard source counts: {standard_sources}"
         )

@@ -22,6 +22,12 @@ OUTPUT_FIELDS = {
     "search_count",
     "events",
 }
+EXCLUDED_SFT_IDS = {
+    "nq_train_37781",
+    "hotpotqa_train_52219",
+    "nq_train_15129",
+    "nq_train_13170",
+}
 THINK_PROTOCOL_TAGS = (
     "<search>", "</search>",
     "<information>", "</information>",
@@ -165,9 +171,21 @@ def main() -> None:
         *(normalize_aethersearch(record) for record in aethersearch_records),
     ]
 
-    if len(output_records) != 4250:
+    merged_ids = {record["id"] for record in output_records}
+    missing_excluded_ids = EXCLUDED_SFT_IDS - merged_ids
+    if missing_excluded_ids:
         raise ValueError(
-            f"Expected 4250 total trajectories, got {len(output_records)}"
+            "Excluded SFT IDs are missing from merged data: "
+            f"{sorted(missing_excluded_ids)}"
+        )
+    output_records = [
+        record for record in output_records
+        if record["id"] not in EXCLUDED_SFT_IDS
+    ]
+
+    if len(output_records) != 4246:
+        raise ValueError(
+            f"Expected 4246 total trajectories, got {len(output_records)}"
         )
     output_ids = [record["id"] for record in output_records]
     if len(set(output_ids)) != len(output_ids):
