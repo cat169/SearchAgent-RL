@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sys
-from collections import Counter
 from pathlib import Path
 
 
@@ -10,21 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from agent.system_prompt import AGENT_SYSTEM_PROMPT
-
-
-NARROW_PATH = Path("data/processed/sft/narrow.jsonl")
-STANDARD_PATH = Path("data/processed/sft/standard.jsonl")
-FIXED_IDS = (
-    "hotpotqa_dev_2687",
-    "hotpotqa_dev_2870",
-    "hotpotqa_dev_1794",
-)
-PROTOCOL_TAGS = (
-    "<think>", "</think>",
-    "<search>", "</search>",
-    "<information>", "</information>",
-    "<answer>", "</answer>",
-)
 
 
 def build_messages(record: dict) -> list[dict[str, str]]:
@@ -77,91 +62,39 @@ def build_messages(record: dict) -> list[dict[str, str]]:
     return messages
 
 
-def audit_file(path: Path) -> dict:
-    records = 0
-    success = 0
-    sources = Counter()
-    search_counts = Counter()
-    search_mismatches = 0
-    think_tags = Counter()
-    failures = []
-    fixed_samples = {}
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Export canonical SFT records as conversational messages JSONL."
+    )
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    return parser.parse_args()
 
-    with path.open("r", encoding="utf-8") as input_file:
+
+def main() -> None:
+    args = parse_args()
+    if args.input.resolve() == args.output.resolve():
+        raise ValueError("Input and output must be different files")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+
+    count = 0
+    with args.input.open("r", encoding="utf-8") as input_file, args.output.open(
+        "w", encoding="utf-8", newline="\n"
+    ) as output_file:
         for line in input_file:
             if not line.strip():
                 continue
             record = json.loads(line)
-            records += 1
-            sources[record["source"]] += 1
-            search_counts[record["search_count"]] += 1
-            if sum(
-                event["type"] == "search" for event in record["events"]
-            ) != record["search_count"]:
-                search_mismatches += 1
+            if sum(event["type"] == "search" for event in record["events"]) != record["search_count"]:
+                raise ValueError(f"Search count mismatch for {record['id']}")
+            output_file.write(
+                json.dumps({"messages": build_messages(record)}, ensure_ascii=False) + "\n"
+            )
+            count += 1
 
-            think_contents = [
-                event["content"] for event in record["events"]
-                if event["type"] == "think"
-            ]
-            for tag in PROTOCOL_TAGS:
-                if any(tag in content for content in think_contents):
-                    think_tags[tag] += 1
-
-            try:
-                messages = build_messages(record)
-            except ValueError as exc:
-                failures.append(
-                    (record["id"], [e["type"] for e in record["events"]], str(exc))
-                )
-                continue
-            success += 1
-            if record["id"] in FIXED_IDS:
-                fixed_samples[record["id"]] = messages
-
-    return {
-        "records": records,
-        "success": success,
-        "failures": failures,
-        "sources": sources,
-        "search_counts": search_counts,
-        "search_mismatches": search_mismatches,
-        "think_tags": think_tags,
-        "fixed_samples": fixed_samples,
-    }
-
-
-def main() -> None:
-    sys.stdout.reconfigure(encoding="utf-8")
-    audits = {
-        "Narrow": audit_file(NARROW_PATH),
-        "Standard": audit_file(STANDARD_PATH),
-    }
-    for name, audit in audits.items():
-        print(f"{name} message audit")
-        print(f"  records: {audit['records']}")
-        print(f"  successful renders: {audit['success']}")
-        print(f"  failed renders: {len(audit['failures'])}")
-        print(f"  source: {dict(sorted(audit['sources'].items()))}")
-        print(f"  search_count: {dict(sorted(audit['search_counts'].items()))}")
-        print(f"  search_count mismatches: {audit['search_mismatches']}")
-        print("  think protocol-tag sample counts:")
-        for tag in PROTOCOL_TAGS:
-            print(f"    {tag}: {audit['think_tags'][tag]}")
-        for record_id, pattern, reason in audit["failures"]:
-            print(f"  FAILED id={record_id} events={pattern} reason={reason}")
-        print()
-
-    for record_id in FIXED_IDS:
-        print(f"Fixed sample: {record_id}")
-        for name, audit in audits.items():
-            messages = audit["fixed_samples"].get(record_id)
-            if messages is not None:
-                print(f"  split: {name}")
-                print(json.dumps(messages, ensure_ascii=False, indent=2))
-                break
-        else:
-            print("  not present or render failed")
+    print(f"Input : {args.input}")
+    print(f"Output: {args.output}")
+    print(f"Records: {count}")
 
 
 if __name__ == "__main__":

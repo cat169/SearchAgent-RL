@@ -9,8 +9,9 @@ INPUT_TEACHER = Path(
     "data/processed/teacher/clean_teacher_trajectories.jsonl"
 )
 INPUT_AETHERSEARCH = Path(
-    "data/processed/aethersearch/train_dedup.jsonl"
+    "data/processed/aethersearch/train.jsonl"
 )
+UNIQUE_POOL_PATH = Path("data/processed/unified/unique_qa_pool.jsonl")
 OUTPUT_PATH = Path("data/processed/sft/all.jsonl")
 
 ALLOWED_EVENT_TYPES = {"think", "search", "information", "answer"}
@@ -150,9 +151,25 @@ def print_statistics(records: list[dict]) -> None:
     print(f"  {OUTPUT_PATH}")
 
 
-def main() -> None:
+def build_records() -> list[dict]:
     teacher_records = read_jsonl(INPUT_TEACHER)
-    aethersearch_records = read_jsonl(INPUT_AETHERSEARCH)
+    keep_ids = {
+        record["uid"] for record in read_jsonl(UNIQUE_POOL_PATH)
+        if record["source"] == "aethersearch"
+    }
+    if len(keep_ids) != 1999:
+        raise ValueError(f"Expected 1999 AetherSearch keep IDs, got {len(keep_ids)}")
+    input_records = read_jsonl(INPUT_AETHERSEARCH)
+    if len(input_records) != 2000:
+        raise ValueError(f"Expected 2000 AetherSearch trajectories, got {len(input_records)}")
+    input_ids = {record["id"] for record in input_records}
+    if len(input_ids) != len(input_records):
+        raise ValueError("AetherSearch input IDs are not unique")
+    aethersearch_records = [
+        record for record in input_records if record["id"] in keep_ids
+    ]
+    if {record["id"] for record in aethersearch_records} != keep_ids:
+        raise ValueError("AetherSearch output IDs do not match keep IDs")
 
     if len(teacher_records) != 2251:
         raise ValueError(
@@ -198,6 +215,11 @@ def main() -> None:
     ):
         raise ValueError("Output search_count does not match events")
 
+    return output_records
+
+
+def main() -> None:
+    output_records = build_records()
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT_PATH.open("w", encoding="utf-8") as output_file:
         for record in output_records:

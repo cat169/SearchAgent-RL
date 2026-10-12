@@ -29,12 +29,16 @@ def split_source(records: list[dict]) -> dict[str, list[dict]]:
     records.sort(key=lambda record: record["uid"])
     random.Random(SEED).shuffle(records)
 
+    teacher_end = TEACHER_PER_SOURCE
+    grpo_end = teacher_end + GRPO_PER_SOURCE
+    val_end = grpo_end + VAL_PER_SOURCE
+    test_end = val_end + TEST_PER_SOURCE
     return {
-        "teacher_sft_candidates": records[0:2000],
-        "grpo": records[2000:3000],
-        "val": records[3000:3500],
-        "test": records[3500:4500],
-        "reserve": records[4500:],
+        "teacher_sft_candidates": records[:teacher_end],
+        "grpo": records[teacher_end:grpo_end],
+        "val": records[grpo_end:val_end],
+        "test": records[val_end:test_end],
+        "reserve": records[test_end:],
     }
 
 
@@ -69,19 +73,23 @@ def main() -> None:
         for name in split_names
     }
 
-    expected_totals = {
-        "teacher_sft_candidates": 4000,
-        "grpo": 2000,
-        "val": 1000,
-        "test": 2000,
-        "reserve": 180237,
+    per_source_counts = {
+        "teacher_sft_candidates": TEACHER_PER_SOURCE,
+        "grpo": GRPO_PER_SOURCE,
+        "val": VAL_PER_SOURCE,
+        "test": TEST_PER_SOURCE,
     }
     expected_sources = {
-        "teacher_sft_candidates": {"nq": 2000, "hotpotqa": 2000},
-        "grpo": {"nq": 1000, "hotpotqa": 1000},
-        "val": {"nq": 500, "hotpotqa": 500},
-        "test": {"nq": 1000, "hotpotqa": 1000},
-        "reserve": {"nq": 86915, "hotpotqa": 93322},
+        name: {"nq": count, "hotpotqa": count}
+        for name, count in per_source_counts.items()
+    }
+    allocated = sum(per_source_counts.values())
+    expected_sources["reserve"] = {
+        "nq": len(nq_records) - allocated,
+        "hotpotqa": len(hotpotqa_records) - allocated,
+    }
+    expected_totals = {
+        name: sum(counts.values()) for name, counts in expected_sources.items()
     }
 
     uid_sets = {}

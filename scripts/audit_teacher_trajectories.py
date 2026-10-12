@@ -344,12 +344,6 @@ def build_report() -> dict[str, Any]:
     searched_rows = [
         row for row in answer_em_rows if row["search_count"] >= 1
     ]
-    candidate_a = [row for row in answer_em_rows if row["exact_match"]]
-    candidate_b = [
-        row
-        for row in candidate_a
-        if row["search_count"] >= 1
-    ]
 
     report = {
         "coverage": coverage,
@@ -370,30 +364,6 @@ def build_report() -> dict[str, Any]:
             "all_valid_answer_trajectories": em_summary(answer_em_rows),
             "zero_search_answers": em_summary(zero_search_rows),
             "one_or_more_search_answers": em_summary(searched_rows),
-        },
-        "filter_simulation": {
-            "raw_trajectories": len(trajectories),
-            "canonical_structure_valid": len(valid_records),
-            "valid_and_termination_answer": len(answer_em_rows),
-            "valid_answer_normalized_em": len(candidate_a),
-            "valid_answer_em_search_at_least_one": len(candidate_b),
-            "correct_removed_only_for_zero_search": (
-                len(candidate_a) - len(candidate_b)
-            ),
-            "candidate_a": {
-                "nq": sum(row["source"] == "nq" for row in candidate_a),
-                "hotpotqa": sum(
-                    row["source"] == "hotpotqa" for row in candidate_a
-                ),
-                "total": len(candidate_a),
-            },
-            "candidate_b": {
-                "nq": sum(row["source"] == "nq" for row in candidate_b),
-                "hotpotqa": sum(
-                    row["source"] == "hotpotqa" for row in candidate_b
-                ),
-                "total": len(candidate_b),
-            },
         },
         "em_mismatch_examples": mismatch_examples,
     }

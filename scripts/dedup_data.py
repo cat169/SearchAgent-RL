@@ -19,6 +19,11 @@ SOURCE_PRIORITY = {
     "nq": 1,
     "hotpotqa": 2,
 }
+SOURCE_SPLITS = {
+    "nq": ("dev", "test", "train"),
+    "hotpotqa": ("dev", "train"),
+    "aethersearch": ("train",),
+}
 
 
 # ============================================================
@@ -191,12 +196,7 @@ def load_dataset_directory(
             f"Dataset directory does not exist: {directory}"
         )
 
-    jsonl_files = sorted(directory.glob("*.jsonl"))
-
-    if not jsonl_files:
-        raise FileNotFoundError(
-            f"No .jsonl files found under: {directory}"
-        )
+    jsonl_files = [directory / f"{split}.jsonl" for split in SOURCE_SPLITS[source]]
 
     records = []
 
@@ -1233,7 +1233,7 @@ MANIFEST_PATH = UNIFIED_OUTPUT_DIR / "dedup_manifest.jsonl"
 def load_unique_records(source: str, directory: Path) -> list[dict]:
     records = []
 
-    for path in sorted(directory.glob("*.jsonl")):
+    for path in (directory / f"{split}.jsonl" for split in SOURCE_SPLITS[source]):
         for item in read_jsonl(path):
             if source == "aethersearch":
                 record = {

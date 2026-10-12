@@ -7,7 +7,7 @@ from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
-from audit_teacher_trajectories import (
+from scripts.audit_teacher_trajectories import (
     count_searches,
     extract_final_answer,
     is_exact_match,

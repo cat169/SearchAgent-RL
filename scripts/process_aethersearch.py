@@ -137,11 +137,6 @@ def transform_sample(sample: dict[str, Any], row_index: int) -> dict[str, Any]:
         sample_id=sample_id,
         question=question,
     )
-    if any(event["type"] not in ALLOWED_EVENT_TYPES for event in events):
-        raise ValueError("events contain an unsupported type")
-    if any(not event["content"].strip() for event in events):
-        raise ValueError("events contain empty content")
-
     event_counts = Counter(event["type"] for event in events)
     if event_counts["search"] != search_count:
         raise ValueError(
@@ -165,8 +160,6 @@ def transform_sample(sample: dict[str, Any], row_index: int) -> dict[str, Any]:
 
     answer = events[-1]["content"]
     answers = [answer]
-    if answers[0] != events[-1]["content"]:
-        raise ValueError("answers[0] does not match the answer event content")
 
     return {
         "id": f"aethersearch_{sample_id}",
