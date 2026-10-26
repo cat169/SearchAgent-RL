@@ -91,6 +91,7 @@ def build_trainer(args: argparse.Namespace, train_dataset, val_dataset):
         eos_token="<|im_end|>",
         bf16=True,
         per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
         gradient_accumulation_steps=8,
         gradient_checkpointing=True,
         learning_rate=1e-4,
