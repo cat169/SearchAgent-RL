@@ -43,6 +43,14 @@ RESERVED_TAG_PATTERN = re.compile(
 class InputTooLongError(RuntimeError):
     """Raised instead of silently truncating an over-length Agent history."""
 
+    def __init__(self, input_tokens: int, max_input_tokens: int) -> None:
+        self.input_tokens = input_tokens
+        self.max_input_tokens = max_input_tokens
+        super().__init__(
+            f"Agent input has {input_tokens} tokens, exceeding "
+            f"--max-input-tokens={max_input_tokens}; history was not truncated"
+        )
+
 
 @dataclass(frozen=True)
 class RawProtocolResult:
@@ -77,6 +85,8 @@ class EvaluationResult:
     steps: list[EvaluationStep]
     termination_reason: str
     final_answer: str | None
+    input_tokens_at_failure: int | None = None
+    max_input_tokens: int | None = None
 
     @property
     def search_count(self) -> int:
@@ -267,10 +277,7 @@ class QwenSFTV2Model:
         input_ids = encoded["input_ids"]
         input_token_count = input_ids.shape[-1]
         if input_token_count > self.max_input_tokens:
-            raise InputTooLongError(
-                f"Agent input has {input_token_count} tokens, exceeding "
-                f"--max-input-tokens={self.max_input_tokens}; history was not truncated"
-            )
+            raise InputTooLongError(input_token_count, self.max_input_tokens)
 
         model_inputs = {
             key: value.to(self.device)
@@ -320,7 +327,16 @@ def run_agent(model: QwenSFTV2Model, environment, question: str) -> EvaluationRe
     steps: list[EvaluationStep] = []
 
     for _ in range(MAX_TURNS):
-        generation = model.generate_turn(messages)
+        try:
+            generation = model.generate_turn(messages)
+        except InputTooLongError as error:
+            return EvaluationResult(
+                steps=steps,
+                termination_reason="input_too_long",
+                final_answer=None,
+                input_tokens_at_failure=error.input_tokens,
+                max_input_tokens=error.max_input_tokens,
+            )
         protocol = generation.protocol
         if not protocol.strict_valid:
             steps.append(EvaluationStep(generation=generation, observation=""))
@@ -382,6 +398,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--index-path", type=Path, default=DEFAULT_INDEX_PATH)
     parser.add_argument("--corpus-path", type=Path, default=DEFAULT_CORPUS_PATH)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Validate and append to an existing results.jsonl prefix.",
+    )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS)
     parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
@@ -406,6 +427,67 @@ def load_eval_records(path: Path, limit: int | None) -> list[dict]:
     return records
 
 
+def load_resume_results(path: Path, eval_records: list[dict]) -> list[dict]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Cannot resume without an existing results file: {path}")
+
+    completed: list[dict] = []
+    seen_ids: set[str] = set()
+    with path.open("r", encoding="utf-8") as input_file:
+        for line_number, line in enumerate(input_file, 1):
+            if not line.strip():
+                raise ValueError(f"Blank line in results file at line {line_number}")
+            try:
+                result = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"Invalid JSON in results file at line {line_number}: {error}"
+                ) from error
+            if not isinstance(result, dict):
+                raise ValueError(f"Result at line {line_number} is not a JSON object")
+            result_id = result.get("id")
+            if result_id in seen_ids:
+                raise ValueError(f"Duplicate result ID at line {line_number}: {result_id}")
+            seen_ids.add(result_id)
+            completed.append(result)
+
+    if len(completed) > len(eval_records):
+        raise ValueError(
+            f"Results contain {len(completed)} rows but Eval contains {len(eval_records)}"
+        )
+    for index, result in enumerate(completed):
+        expected = eval_records[index]
+        checks = {
+            "id": (result.get("id"), expected["id"]),
+            "question": (result.get("question"), expected["question"]),
+            "gold_answers": (result.get("gold_answers"), expected["answers"]),
+        }
+        mismatches = [
+            name for name, (actual, wanted) in checks.items() if actual != wanted
+        ]
+        if mismatches:
+            raise ValueError(
+                f"Results are not a continuous Eval prefix at line {index + 1} "
+                f"({expected['id']}): mismatched {', '.join(mismatches)}"
+            )
+    return completed
+
+
+def prepare_results(
+    output_dir: Path,
+    resume: bool,
+    eval_records: list[dict],
+) -> tuple[Path, list[dict], str]:
+    results_path = output_dir / "results.jsonl"
+    if resume:
+        completed = load_resume_results(results_path, eval_records)
+        return results_path, completed, "a"
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f"Output directory is not empty: {output_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return results_path, [], "w"
+
+
 def aggregate(records: list[dict]) -> dict:
     turns = sum(record["total_turns"] for record in records)
     if not records:
@@ -419,6 +501,8 @@ def aggregate(records: list[dict]) -> dict:
             "answer_completion_rate": 0.0,
             "average_search_count": 0.0,
             "max_turns_rate": 0.0,
+            "input_too_long_count": 0,
+            "input_too_long_rate": 0.0,
         }
     return {
         "samples": len(records),
@@ -430,6 +514,12 @@ def aggregate(records: list[dict]) -> dict:
         "answer_completion_rate": sum(record["termination_reason"] == "answer" for record in records) / len(records),
         "average_search_count": sum(record["search_count"] for record in records) / len(records),
         "max_turns_rate": sum(record["termination_reason"] == "max_turns" for record in records) / len(records),
+        "input_too_long_count": sum(
+            record["termination_reason"] == "input_too_long" for record in records
+        ),
+        "input_too_long_rate": sum(
+            record["termination_reason"] == "input_too_long" for record in records
+        ) / len(records),
     }
 
 
@@ -449,8 +539,8 @@ def write_summary(path: Path, grouped_metrics: dict[str, dict], args, model) -> 
         "",
         "## Metrics",
         "",
-        "| Group | N | EM | F1 | Valid Action | Strict Raw Protocol | EOS | Answer Completion | Avg Search | Max Turns |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Group | N | EM | F1 | Valid Action | Strict Raw Protocol | EOS | Answer Completion | Avg Search | Max Turns | Input Too Long |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for group in ("nq", "hotpotqa", "overall"):
         metric = grouped_metrics[group]
@@ -459,7 +549,8 @@ def write_summary(path: Path, grouped_metrics: dict[str, dict], args, model) -> 
             f"{metric['answer_f1']:.4f} | {metric['valid_action_rate']:.4f} | "
             f"{metric['strict_raw_protocol_rate']:.4f} | {metric['eos_rate']:.4f} | "
             f"{metric['answer_completion_rate']:.4f} | "
-            f"{metric['average_search_count']:.4f} | {metric['max_turns_rate']:.4f} |"
+            f"{metric['average_search_count']:.4f} | {metric['max_turns_rate']:.4f} | "
+            f"{metric['input_too_long_count']} ({metric['input_too_long_rate']:.4f}) |"
         )
     lines.extend(
         [
@@ -470,22 +561,100 @@ def write_summary(path: Path, grouped_metrics: dict[str, dict], args, model) -> 
             "- Strict Raw Protocol: one complete Think, then one Action, then `<|im_end|>`, with no extra protocol text.",
             "- EOS Rate: fraction of generated turns whose final token is `<|im_end|>`.",
             "- Answer Completion: fraction of questions terminating with a valid Answer.",
+            "- Input Too Long: questions stopped without truncation because the next-turn history exceeded the configured input limit.",
             "- EM/F1 measure final answer correctness and are independent of protocol validity.",
         ]
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def build_output_record(record: dict, result: EvaluationResult) -> dict:
+    turns = []
+    for turn_index, step in enumerate(result.steps, 1):
+        generation = step.generation
+        turns.append(
+            {
+                "turn": turn_index,
+                "raw_generation": generation.raw_text,
+                "generated_token_ids": generation.token_ids,
+                "input_tokens": generation.input_tokens,
+                "generated_tokens": len(generation.token_ids),
+                "final_token_id": generation.final_token_id,
+                "reached_max_new_tokens": generation.reached_max_new_tokens,
+                "protocol": asdict(generation.protocol),
+                "history_prefix_preserved": generation.history_prefix_preserved,
+                "completed_turn_matches_template": generation.completed_turn_matches_template,
+                "information": step.observation,
+            }
+        )
+
+    prediction = result.final_answer or ""
+    if result.termination_reason == "input_too_long":
+        em, f1 = 0.0, 0.0
+    else:
+        em, f1 = best_qa_scores(prediction, record["answers"])
+    return {
+        "id": record["id"],
+        "source": record["source"],
+        "question": record["question"],
+        "gold_answers": record["answers"],
+        "predicted_answer": prediction,
+        "termination_reason": result.termination_reason,
+        "input_tokens_at_failure": result.input_tokens_at_failure,
+        "max_input_tokens": result.max_input_tokens,
+        "search_count": result.search_count,
+        "total_turns": len(result.steps),
+        "valid_action_count": sum(
+            step.generation.protocol.valid_action for step in result.steps
+        ),
+        "strict_protocol_count": sum(
+            step.generation.protocol.strict_valid for step in result.steps
+        ),
+        "eos_count": sum(
+            step.generation.protocol.ended_with_im_end for step in result.steps
+        ),
+        "turns": turns,
+        "em": em,
+        "f1": f1,
+    }
+
+
+def evaluate_records(
+    records: list[dict],
+    model,
+    environment,
+    output_file,
+    start_index: int,
+    total_records: int,
+) -> list[dict]:
+    outputs = []
+    for offset, record in enumerate(records, 1):
+        result = run_agent(model, environment, record["question"])
+        output = build_output_record(record, result)
+        output_file.write(json.dumps(output, ensure_ascii=False) + "\n")
+        output_file.flush()
+        outputs.append(output)
+        print(
+            f"[{start_index + offset}/{total_records}] {record['id']}: "
+            f"termination={result.termination_reason}, searches={result.search_count}, "
+            f"EM={output['em']:.0f}, F1={output['f1']:.3f}"
+        )
+    return outputs
+
+
 def main() -> None:
     args = parse_args()
-    if args.output_dir.exists() and any(args.output_dir.iterdir()):
-        raise FileExistsError(f"Output directory is not empty: {args.output_dir}")
+
+    records = load_eval_records(args.eval_path, args.limit)
+    results_path, completed, output_mode = prepare_results(
+        args.output_dir, args.resume, records
+    )
+    remaining_records = records[len(completed):]
 
     from agent.environment import SearchEnvironment
     from agent.search_tool import SearchTool
     from retrieval.bm25_retriever import BM25Retriever
 
-    records = load_eval_records(args.eval_path, args.limit)
     model = QwenSFTV2Model(
         args.base_model, args.adapter_path, args.max_new_tokens, args.max_input_tokens
     )
@@ -494,57 +663,22 @@ def main() -> None:
     )
     environment = SearchEnvironment(SearchTool(retriever, default_top_k=TOP_K))
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    results_path = args.output_dir / "results.jsonl"
-    completed: list[dict] = []
-    with results_path.open("w", encoding="utf-8", newline="\n") as output_file:
-        for index, record in enumerate(records, 1):
-            result = run_agent(model, environment, record["question"])
-            turns = []
-            for turn_index, step in enumerate(result.steps, 1):
-                generation = step.generation
-                turns.append(
-                    {
-                        "turn": turn_index,
-                        "raw_generation": generation.raw_text,
-                        "generated_token_ids": generation.token_ids,
-                        "input_tokens": generation.input_tokens,
-                        "generated_tokens": len(generation.token_ids),
-                        "final_token_id": generation.final_token_id,
-                        "reached_max_new_tokens": generation.reached_max_new_tokens,
-                        "protocol": asdict(generation.protocol),
-                        "history_prefix_preserved": generation.history_prefix_preserved,
-                        "completed_turn_matches_template": generation.completed_turn_matches_template,
-                        "information": step.observation,
-                    }
+    if remaining_records:
+        with results_path.open(
+            output_mode, encoding="utf-8", newline="\n"
+        ) as output_file:
+            completed.extend(
+                evaluate_records(
+                    remaining_records,
+                    model,
+                    environment,
+                    output_file,
+                    start_index=len(completed),
+                    total_records=len(records),
                 )
-
-            prediction = result.final_answer or ""
-            em, f1 = best_qa_scores(prediction, record["answers"])
-            output = {
-                "id": record["id"],
-                "source": record["source"],
-                "question": record["question"],
-                "gold_answers": record["answers"],
-                "predicted_answer": prediction,
-                "termination_reason": result.termination_reason,
-                "search_count": result.search_count,
-                "total_turns": len(result.steps),
-                "valid_action_count": sum(step.generation.protocol.valid_action for step in result.steps),
-                "strict_protocol_count": sum(step.generation.protocol.strict_valid for step in result.steps),
-                "eos_count": sum(step.generation.protocol.ended_with_im_end for step in result.steps),
-                "turns": turns,
-                "em": em,
-                "f1": f1,
-            }
-            output_file.write(json.dumps(output, ensure_ascii=False) + "\n")
-            output_file.flush()
-            completed.append(output)
-            print(
-                f"[{index}/{len(records)}] {record['id']}: "
-                f"termination={result.termination_reason}, searches={result.search_count}, "
-                f"EM={em:.0f}, F1={f1:.3f}"
             )
+    else:
+        print(f"All {len(records)} evaluation records are already complete.")
 
     grouped = {
         "nq": aggregate([record for record in completed if record["source"] == "nq"]),
