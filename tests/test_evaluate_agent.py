@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from agent.protocol import AgentAction
 from agent.system_prompt import AGENT_SYSTEM_PROMPT
-from scripts.evaluate_sft_agent_v2 import (
+from evaluation.evaluate_agent import (
     GenerationResult,
     IM_END_TOKEN,
     InputTooLongError,

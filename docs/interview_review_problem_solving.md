@@ -364,7 +364,7 @@ Environment → observation
 
 ---
 
-## 9. 问题八：run_teacher.py 通过字符串差分反推 observation
+## 9. 问题八：generate_teacher_trajectories.py 通过字符串差分反推 observation
 
 这是目前 Teacher runtime 重构中最重要的问题之一。
 
@@ -421,7 +421,7 @@ model.generate()
 → 当场记录 AgentStep
 ```
 
-之后 `run_teacher.py` 直接使用：
+之后 `generate_teacher_trajectories.py` 直接使用：
 
 ```text
 model.raw_turns
@@ -439,7 +439,7 @@ result.steps
 
 ---
 
-## 10. 问题九：action 为什么不能在 run_teacher.py 再 parse 一遍
+## 10. 问题九：action 为什么不能在 generate_teacher_trajectories.py 再 parse 一遍
 
 ### 10.1 问题
 
@@ -505,7 +505,7 @@ invalid
 → AgentLoop return
 → 不追加纠错 observation
 → 不再次调用 DeepSeek
-→ run_teacher.py 进入下一条 QA
+→ generate_teacher_trajectories.py 进入下一条 QA
 ```
 
 ### 11.3 为什么
@@ -940,7 +940,7 @@ AgentLoop
     ├── answer  → success
     └── invalid → fail-fast
     ▼
-run_teacher.py
+generate_teacher_trajectories.py
     │
     ├── combine raw_turns + structured steps
     ├── save raw trajectory

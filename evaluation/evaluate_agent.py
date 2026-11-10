@@ -1,4 +1,4 @@
-"""Evaluate SFT v2 with strict raw protocol parsing and SFT-aligned history."""
+"""Evaluate the SFT Agent with strict raw parsing and SFT-aligned history."""
 
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ def parse_raw_generation(
     token_ids: list[int],
     im_end_token_id: int,
 ) -> RawProtocolResult:
-    """Validate the exact SFT v2 raw response, including its terminal token."""
+    """Validate the exact SFT raw response, including its terminal token."""
     valid_action, candidate = _action_candidate(raw_text)
     ended_with_im_end = bool(token_ids) and token_ids[-1] == im_end_token_id
 
@@ -213,7 +213,7 @@ def completed_turn_matches_template(
     return rendered[len(inference_prompt):].rstrip("\r\n") == raw_text
 
 
-class QwenSFTV2Model:
+class QwenSFTModel:
     """GPU model adapter that preserves raw generation and structured history."""
 
     def __init__(
@@ -228,7 +228,7 @@ class QwenSFTV2Model:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for SFT v2 Agent Evaluation")
+            raise RuntimeError("CUDA is required for SFT Agent Evaluation")
 
         self.torch = torch
         self.max_new_tokens = max_new_tokens
@@ -319,7 +319,7 @@ class QwenSFTV2Model:
         )
 
 
-def run_agent(model: QwenSFTV2Model, environment, question: str) -> EvaluationResult:
+def run_agent(model: QwenSFTModel, environment, question: str) -> EvaluationResult:
     messages = [
         {"role": "system", "content": AGENT_SYSTEM_PROMPT},
         {"role": "user", "content": question},
@@ -391,7 +391,7 @@ def best_qa_scores(prediction: str, gold_answers: list[str]) -> tuple[float, flo
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate the SFT v2 Agent protocol.")
+    parser = argparse.ArgumentParser(description="Evaluate the SFT Agent protocol.")
     parser.add_argument("--eval-path", type=Path, default=DEFAULT_EVAL_PATH)
     parser.add_argument("--base-model", type=Path, default=DEFAULT_BASE_MODEL)
     parser.add_argument("--adapter-path", type=Path, default=DEFAULT_ADAPTER_PATH)
@@ -525,7 +525,7 @@ def aggregate(records: list[dict]) -> dict:
 
 def write_summary(path: Path, grouped_metrics: dict[str, dict], args, model) -> None:
     lines = [
-        "# SFT v2 Agent Evaluation",
+        "# SFT Agent Evaluation",
         "",
         "## Configuration",
         "",
@@ -655,7 +655,7 @@ def main() -> None:
     from agent.search_tool import SearchTool
     from retrieval.bm25_retriever import BM25Retriever
 
-    model = QwenSFTV2Model(
+    model = QwenSFTModel(
         args.base_model, args.adapter_path, args.max_new_tokens, args.max_input_tokens
     )
     retriever = BM25Retriever(

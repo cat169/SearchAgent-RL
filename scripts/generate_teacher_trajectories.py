@@ -1,3 +1,5 @@
+"""Generate DeepSeek Teacher trajectories with checkpoint/resume support."""
+
 from __future__ import annotations
 
 import argparse

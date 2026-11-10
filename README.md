@@ -1,280 +1,102 @@
 # SearchAgent-RL
 
-基于 Search-R1 思想的大语言模型自主检索 Agent 后训练项目。
+面向外部搜索工具的 LLM Agent：学习何时搜索、如何使用检索证据以及何时回答。
 
-本项目探索如何通过 **Teacher-generated Agent Trajectory、Agentic SFT
-以及 GRPO
-强化学习**，提升大语言模型在开放域问答任务中的自主检索、工具调用和多步推理能力。
+技术路线：NQ + HotpotQA → Local BM25 → DeepSeek Teacher → Qwen3-4B-Base Agentic SFT → veRL GRPO → Agent Evaluation。
 
-------------------------------------------------------------------------
+## 当前状态
 
-## 项目简介
+已完成 NQ / HotpotQA 数据处理、Local BM25、DeepSeek Teacher 轨迹生成、SFT 数据构建、选择性控制 Token + LoRA SFT，以及对应 Agent Evaluation 实现。
 
-近年来，大语言模型（Large Language Models,
-LLMs）在自然语言理解和文本生成任务中取得了显著进展。
+历史数据探索包含 AetherSearch；当前正式 SFT 数据只包含 NQ 与 HotpotQA，不再将 AetherSearch 纳入训练。正式数据为 Train 1,898、Validation 150；固定 Agent Evaluation 为 NQ test 100 + HotpotQA dev 100。
 
-然而，传统 LLM
-主要依赖模型参数中存储的知识进行回答，在面对复杂问题时仍存在以下局限：
+当前保留的是此前 SFT v2 的有效实现。veRL GRPO、Reward 和 GRPO rollout 接口尚未实现。正式训练及评测产物未同步到当前本地仓库，指标缺口详见 [SFT 实验记录](docs/sft_results.md)。
 
--   知识更新困难；
--   缺少主动获取外部信息的能力；
--   无法自主判断何时调用外部工具；
--   缺少多步检索和推理能力。
+## 目录
 
-Search-R1 提出了一种基于强化学习的搜索 Agent
-训练范式，使语言模型能够自主决定是否调用搜索工具，并通过强化学习优化搜索与推理过程。
+```text
+agent/          # 公共协议、Teacher AgentLoop、环境、搜索工具和 Prompt
+retrieval/      # Local BM25 Retriever
+teacher/        # DeepSeek API 适配器
+training/       # 正式 SFT 训练入口
+evaluation/     # 正式 Student Agent Evaluation
+scripts/        # QA 处理、Teacher 生成、SFT 构建与 Messages 导出
+tests/          # 协议、历史渲染、超长上下文及断点续评测试
+docs/           # 正式实验记录和技术文档
+data/           # 本地数据、语料和索引（Git 忽略）
+requirements-sft.txt
+```
 
-本项目基于 Search-R1 的核心思想，构建一个完整的大语言模型 Agent
-后训练流程，通过 Agentic SFT + GRPO
-的方式，使小规模语言模型获得自主检索能力。
+所有命令从仓库根目录执行。训练环境为 Linux、Python 3.11、RTX 4090；SFT 依赖见 `requirements-sft.txt`。Teacher 另外需要 `openai`、`python-dotenv`；检索需要已有 Pyserini/Java 环境、Lucene 索引和 wiki-18 corpus，SFT 依赖文件并不包含完整检索环境。API Key 通过被忽略的根目录 `.env` 提供。
 
-------------------------------------------------------------------------
+## 数据准备
 
-# 项目目标
+```bash
+python -m scripts.process_nq
+python -m scripts.process_hotpotqa
+python -m scripts.build_sft_dataset
+python -m scripts.build_agent_eval_set
+```
 
-本项目主要目标：
+正式构建链：
+```text
+processed QA → 已冻结 Teacher candidates → DeepSeek raw → 已筛选 clean
+→ build_sft_dataset → canonical Train/Validation + Messages
+→ build_agent_eval_set → 固定 Eval200
+```
 
-1.  构建具备自主检索能力的大语言模型 Agent；
-2.  利用 Teacher LLM 生成高质量 Agent trajectory 数据；
-3.  通过 Agentic SFT 训练模型学习基础工具调用能力；
-4.  通过 GRPO 强化学习优化模型搜索决策能力；
-5.  建立完整的大模型 Agent 后训练实验流程。
+`build_sft_dataset` 从现有 Clean Teacher 读取轨迹，仅接受原始 train ID，隔离 NQ dev/test、HotpotQA dev 的规范化问题，并调用唯一 Renderer。冻结数据仍沿用 `data/processed/sft/nq_hotpotqa_v1/` 和 `data/processed/evaluation/nq_hotpotqa_v1/` 路径；这是数据版本名，不代表使用旧训练实现，不要在整理代码时重建或改名。
 
-整体训练流程：
+单独导出 Messages：
+```bash
+python -m scripts.render_sft_messages \
+  --input data/processed/sft/nq_hotpotqa_v1/train.jsonl \
+  --output /tmp/train_messages.jsonl
+```
 
-    基础语言模型
-            ↓
-    Teacher-generated Agent Trajectory
-            ↓
-    Agentic SFT
-            ↓
-    GRPO Reinforcement Learning
-            ↓
-    Autonomous Search Agent
+Teacher 生成入口：
+```bash
+python -m scripts.generate_teacher_trajectories --limit 4000 --resume
+```
 
-------------------------------------------------------------------------
+该入口依赖 `data/processed/splits/teacher_sft_candidates.jsonl`，本地当前缺失；不加 `--resume` 会覆盖对应输出。原始候选构建及 Raw→Clean 筛选程序在当前工作区未找到，保留的数据及审计报告不能替代缺失代码。因此目前可从 Clean 重建正式 SFT，不能宣称原始 QA→Clean 全链已能重新运行。
 
-# 技术路线
+## SFT 训练
 
-整体流程：
+```bash
+python -m training.train_sft \
+  --model-path /root/models/Qwen3-4B-Base \
+  --train-path data/processed/sft/nq_hotpotqa_v1/messages/train_messages.jsonl \
+  --val-path data/processed/sft/nq_hotpotqa_v1/messages/validation_messages.jsonl \
+  --output-dir outputs/sft_v2
+```
 
-    开放域问答数据集
-    (NQ / HotpotQA)
+LoRA r=16、alpha=32、dropout=0.05、all-linear；选择性训练 `<think>`、`</think>`、`<|im_end|>`，保持输入/输出权重共享。BF16、SDPA、assistant-only loss、max_length=4096、packing=False。保留 `--limit`、`--max-steps`、`--check-only`、`--resume-from-checkpoint`。新训练必须使用空输出目录。
 
-            ↓
+`outputs/sft_v2` 是沿用的产物路径约定；本地没有该 Adapter，实际服务器 Checkpoint 需由正式记录确认。
 
-    数据清洗与划分
+## Agent Evaluation
 
-            ↓
+```bash
+python -m evaluation.evaluate_agent \
+  --eval-path data/processed/evaluation/nq_hotpotqa_v1/eval.jsonl \
+  --base-model /root/models/Qwen3-4B-Base \
+  --adapter-path /root/SearchAgent-RL/outputs/sft_v2 \
+  --index-path /root/blockdata/SearchAgent-RL/retrieval/wiki-18-bm25-index/bm25 \
+  --corpus-path /root/blockdata/SearchAgent-RL/retrieval/wiki-18-corpus/wiki-18.jsonl \
+  --output-dir outputs/sft_v2_agent_evaluation \
+  --max-new-tokens 512 \
+  --max-input-tokens 4096
+```
 
-    Teacher LLM生成Agent轨迹
+同一目录续评时追加 `--resume`；脚本校验已有结果是 Eval 连续前缀。支持 `--limit 5` 冒烟。每题立即保存到 `results.jsonl`，最终生成 `summary.md`。统计 EM/F1、Valid Action、Strict Raw Protocol、EOS、Answer Completion、平均 Search、Max Turns、Input Too Long。超长上下文不截断，按独立失败状态记零分并继续下一题。
 
-            ↓
+## 验证与后续
 
-    Agentic SFT
+```bash
+python -m unittest discover -s tests -v
+python -m training.train_sft --help
+python -m evaluation.evaluate_agent --help
+```
 
-            ↓
-
-    GRPO强化学习优化
-
-            ↓
-
-    模型评估
-
-------------------------------------------------------------------------
-
-# 核心模块
-
-## 1. 数据构建
-
-基于开放域问答数据集构建 Agent 训练数据。
-
-主要包括：
-
--   数据加载；
--   数据清洗；
--   重复样本过滤；
--   数据划分；
--   SFT 与 GRPO 数据构造。
-
-目标：
-
-将传统 QA 数据转换为适用于 Agent 后训练的数据格式。
-
-------------------------------------------------------------------------
-
-## 2. Search Agent 环境
-
-构建语言模型与搜索工具交互环境。
-
-Agent 能够：
-
--   分析当前问题；
--   判断是否需要搜索；
--   生成搜索请求；
--   接收检索结果；
--   根据外部信息完成最终回答。
-
-------------------------------------------------------------------------
-
-## 3. Agentic SFT
-
-传统监督微调通常学习：
-
-    Question → Answer
-
-本项目进一步构造包含工具调用过程的 Agent trajectory 数据：
-
-    Question
-
-    ↓
-
-    <think>
-    问题分析
-    </think>
-
-    ↓
-
-    <search>
-    搜索请求
-    </search>
-
-    ↓
-
-    <information>
-    检索结果
-    </information>
-
-    ↓
-
-    <answer>
-    最终答案
-    </answer>
-
-通过监督微调，使模型学习：
-
--   工具调用格式；
--   搜索行为；
--   信息利用方式；
--   多步推理流程。
-
-------------------------------------------------------------------------
-
-## 4. GRPO 强化学习
-
-在 Agentic SFT 基础上，引入 Group Relative Policy Optimization（GRPO）。
-
-训练过程中：
-
-模型针对同一问题生成多个候选轨迹：
-
-    Question
-
-    ↓
-
-    Trajectory 1
-
-    Trajectory 2
-
-    Trajectory 3
-
-根据任务完成情况计算奖励：
-
-    Trajectory
-
-    ↓
-
-    Reward
-
-    ↓
-
-    Advantage
-
-    ↓
-
-    GRPO Update
-
-进一步优化：
-
--   搜索策略；
--   工具调用决策；
--   推理过程；
--   最终回答质量。
-
-------------------------------------------------------------------------
-
-# 实验设计
-
-为了分析不同训练阶段的作用，计划设计以下实验：
-
-  实验                 训练方式                    目的
-  -------------------- --------------------------- -------------------------
-  Base Model           未训练基础模型              测试初始能力
-  QA-SFT               普通问答监督微调            分析传统 SFT 效果
-  Agentic-SFT          Agent trajectory 监督微调   验证 Agent 行为学习效果
-  Agentic-SFT + GRPO   SFT 后强化学习              验证 RL 优化效果
-
-重点评估：
-
--   Answer Accuracy；
--   Search Success Rate；
--   Tool Calling Ability；
--   Multi-step Reasoning Performance。
-
-------------------------------------------------------------------------
-
-# 项目结构
-
-    SearchAgent-RL
-
-    ├── data/
-    ├── agent/
-    ├── sft/
-    ├── grpo/
-    ├── evaluation/
-    ├── configs/
-    ├── scripts/
-    └── docs/
-
-------------------------------------------------------------------------
-
-# 技术栈
-
--   Python
--   PyTorch
--   HuggingFace Transformers
--   PEFT (LoRA)
--   HuggingFace TRL
--   Large Language Model Agent
--   Reinforcement Learning
-
-------------------------------------------------------------------------
-
-# 项目进展
-
-## 已完成
-
--   Search-R1整体流程学习
--   Agent Loop理解
--   Retriever交互机制理解
--   Agent trajectory理解
--   GRPO算法理解
-
-## 开发中
-
--   数据处理 Pipeline
--   Agent 环境构建
--   Teacher trajectory 生成
--   Agentic SFT 训练
--   GRPO 训练
--   实验分析
-
-------------------------------------------------------------------------
-
-# References
-
--   Search-R1: An Efficient, Scalable RL Training Framework for
-    Reasoning & Search Engine Calling Interleaved LLM
--   DeepSeek-R1
--   HuggingFace Transformers
--   HuggingFace TRL
+本地未找到正式训练 Loss、验证 Loss 和最终 Eval200 结果，当前不提供未经文件确认的效果数值。下一阶段计划基于确认后的正式 SFT Adapter 实现 veRL GRPO，并复用冻结 Eval200；目前没有可运行的 GRPO 训练入口。

@@ -3,13 +3,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import torch
-from datasets import load_dataset
-from peft import LoraConfig
-from transformers import AutoTokenizer
-from trl import SFTConfig, SFTTrainer
-
-
 DEFAULT_MODEL_PATH = Path("/root/models/Qwen3-4B-Base")
 MAX_LENGTH = 4096
 SEED = 123
@@ -52,6 +45,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_datasets(args: argparse.Namespace):
+    from datasets import load_dataset
+
     datasets = load_dataset(
         "json",
         data_files={
@@ -90,6 +85,8 @@ def check_output_path(
 
 
 def load_and_check_tokenizer(model_path: Path):
+    from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(
         str(model_path),
         local_files_only=True,
@@ -107,6 +104,10 @@ def load_and_check_tokenizer(model_path: Path):
 
 
 def build_trainer(args: argparse.Namespace, train_dataset, val_dataset, tokenizer):
+    import torch
+    from peft import LoraConfig
+    from trl import SFTConfig, SFTTrainer
+
     peft_config = LoraConfig(
         r=16,
         lora_alpha=32,
@@ -163,6 +164,8 @@ def build_trainer(args: argparse.Namespace, train_dataset, val_dataset, tokenize
 
 
 def check_adapter_initialization(model) -> None:
+    import torch
+
     if not model.config.tie_word_embeddings:
         raise RuntimeError("Base model does not have tied input/output embeddings")
 
@@ -255,7 +258,7 @@ def check_adapter_initialization(model) -> None:
             "Unexpected trainable base parameters: " + ", ".join(unexpected_parameters)
         )
 
-    print("SFT v2 initialization checks passed")
+    print("SFT initialization checks passed")
     print(f"  special token IDs       : {SPECIAL_TOKEN_IDS}")
     print(f"  trainable token delta   : {tuple(token_delta.shape)}")
     print(f"  trainable LoRA tensors  : {len(lora_parameters)}")
@@ -270,7 +273,7 @@ def main() -> None:
     tokenizer = load_and_check_tokenizer(args.model_path)
     train_dataset, val_dataset = load_datasets(args)
 
-    print("SFT v2 training configuration")
+    print("SFT training configuration")
     print(f"  model path              : {args.model_path}")
     print(f"  train / val paths       : {args.train_path} / {args.val_path}")
     print(f"  train / val samples     : {len(train_dataset)} / {len(val_dataset)}")
