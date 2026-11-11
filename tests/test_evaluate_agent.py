@@ -6,18 +6,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent.protocol import AgentAction
+from agent.raw_protocol import IM_END_TOKEN, assistant_message, parse_raw_generation
 from agent.system_prompt import AGENT_SYSTEM_PROMPT
 from evaluation.evaluate_agent import (
     GenerationResult,
-    IM_END_TOKEN,
     InputTooLongError,
     aggregate,
-    assistant_message,
     check_history_prefix,
     completed_turn_matches_template,
     evaluate_records,
     load_resume_results,
-    parse_raw_generation,
     prepare_results,
 )
 from scripts.render_sft_messages import build_messages
