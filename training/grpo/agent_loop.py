@@ -106,6 +106,8 @@ class SearchAgentLoop(AgentLoopBase):
         assistant_turns = 0
         observation_turns = 0
         strict_protocol_valid = True
+        min_global_steps = None
+        max_global_steps = None
 
         for _ in range(MAX_ASSISTANT_TURNS):
             remaining = min(
@@ -129,6 +131,13 @@ class SearchAgentLoop(AgentLoopBase):
                 prompt_ids=runtime_ids,
                 sampling_params=turn_params,
             )
+            versions = getattr(output, "extra_fields", None) or {}
+            low = versions.get("min_global_steps")
+            high = versions.get("max_global_steps")
+            if low is None or high is None:
+                raise ValueError("Generation is missing min_global_steps/max_global_steps metadata")
+            min_global_steps = low if min_global_steps is None else min(min_global_steps, low)
+            max_global_steps = high if max_global_steps is None else max(max_global_steps, high)
             metrics.generate_sequences += perf_counter() - started
             if len(output.token_ids) > max_tokens:
                 raise RuntimeError("Inference server exceeded the requested token budget")
@@ -216,6 +225,8 @@ class SearchAgentLoop(AgentLoopBase):
             metrics=metrics,
             num_turns=1 + assistant_turns + observation_turns,
             extra_fields={
+                "min_global_steps": min_global_steps,
+                "max_global_steps": max_global_steps,
                 "final_answer": final_answer,
                 "termination_reason": termination_reason,
                 "search_count": search_count,

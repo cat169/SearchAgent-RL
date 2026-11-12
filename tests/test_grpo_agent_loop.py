@@ -109,6 +109,7 @@ class FakeServer:
             token_ids=tokens,
             log_probs=[-0.5] * len(tokens),
             stop_reason="completed",
+            extra_fields={"min_global_steps": 0, "max_global_steps": len(self.calls)},
         )
 
 
@@ -172,6 +173,7 @@ class SearchAgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(previous[-1]["content"], "<search>target query</search>")
         self.assertEqual(updated[-1], {"role": "user", "content": "<information>Paris evidence</information>"})
         self.assertEqual(result.extra_fields, {
+            "min_global_steps": 0, "max_global_steps": 2,
             "final_answer": "Paris", "termination_reason": "answer",
             "search_count": 1, "strict_protocol_valid": True,
         })

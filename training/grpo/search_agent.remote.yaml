@@ -1,0 +1,4 @@
+- name: search_agent
+  _target_: training.grpo.agent_loop.SearchAgentLoop
+  index_path: /root/data/retrieval/wiki-18-bm25-index/bm25
+  corpus_path: /root/data/retrieval/wiki-18-corpus/wiki-18.jsonl
